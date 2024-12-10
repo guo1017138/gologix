@@ -259,7 +259,8 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 	refType := refVal.Type()
 	for i := 0; i < refType.NumField(); i++ {
 		field := refType.Field(i)
-		a := p.Align(field.Type)
+		// a := p.Align(field.Type)
+		a := 4 // AB PLC always algin with 4 ???
 		t := field.Tag.Get("pack")
 		s := int(field.Type.Size())
 		k := refVal.Field(i).Kind()
@@ -322,6 +323,7 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 				if err != nil || count != 88 {
 					return n, fmt.Errorf("problem reading packed string. %w", err)
 				}
+				n += 88
 				strLen := binary.LittleEndian.Uint32(strArray)
 				if strLen > 84 {
 					return n, fmt.Errorf("problem reading packed string. string length unexpected %d", strLen)
