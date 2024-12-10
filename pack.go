@@ -316,7 +316,18 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 					bitpos = 0
 				}
 				continue
-
+			case reflect.String:
+				strArray := make([]byte, 88)
+				count, err := r.Read(strArray)
+				if err != nil || count != 88 {
+					return n, fmt.Errorf("problem reading packed string. %w", err)
+				}
+				strLen := binary.LittleEndian.Uint32(strArray)
+				if strLen > 84 {
+					return n, fmt.Errorf("problem reading packed string. string length unexpected %d", strLen)
+				}
+				refVal.Field(i).SetString(string(strArray[4 : strLen+4]))
+				continue
 			}
 
 		}
