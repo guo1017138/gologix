@@ -437,6 +437,10 @@ func (client *Client) Read_single(tag string, datatype CIPType, elements uint16)
 	}
 	_ = hdr
 
+	if hdr.Status != 0 {
+		return nil, fmt.Errorf("problem reading tags. Status %v", CIPStatus(hdr.Status))
+	}
+
 	read_result_header := msgCIPResultHeader{}
 	err = binary.Read(data, binary.LittleEndian, &read_result_header)
 	if err != nil {
@@ -454,6 +458,9 @@ func (client *Client) Read_single(tag string, datatype CIPType, elements uint16)
 	err = items[1].DeSerialize(&hdr2)
 	if err != nil {
 		return 0, fmt.Errorf("problem reading item 2's header. %w", err)
+	}
+	if hdr2.Status[1] != uint8(CIPStatus_OK) {
+		return nil, fmt.Errorf("service returned status %v", CIPStatus(hdr2.Status[1]))
 	}
 
 	if hdr2.Type == CIPTypeStruct {
