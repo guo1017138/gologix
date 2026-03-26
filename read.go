@@ -8,13 +8,33 @@ import (
 	"reflect"
 )
 
-// Read a single tag into data.  Data should be a pointer to the variable where the data will be deposited.
+// Read reads a single tag value from the PLC into the provided data variable.
 //
-// If the data type is not known at read time, use the Read_single function with a CIPType_Unknown type
+// The data parameter must be a pointer to a variable with a type that matches the PLC tag's data type.
+// Supported Go types are mapped to CIP types as documented in types.go.
 //
-// # To efficiently read multiple tags at once, use the ReadMulti, ReadMap, or ReadList functions
+// For arrays and slices, data should be a pre-allocated slice of the correct length:
+//   - Use a pointer (&variable) for scalar values and structs
+//   - Use a slice directly (no pointer) for arrays
 //
-// If the data type does not match what is returned by the controller you will get an error.
+// Examples:
+//
+//	var intTag int16
+//	err := client.Read("TestInt", &intTag)  // Read INT tag
+//
+//	var realTag float32
+//	err := client.Read("TestReal", &realTag)  // Read REAL tag
+//
+//	intArray := make([]int32, 5)
+//	err := client.Read("TestDintArr[2]", intArray)  // Read 5 elements starting at index 2
+//
+//	var udtTag MyStruct
+//	err := client.Read("MyUDTTag", &udtTag)  // Read UDT into struct
+//
+// For reading multiple tags efficiently, use ReadMulti, ReadMap, or ReadList instead.
+// If the tag data type is unknown at compile time, use Read_single with CIPType_Unknown.
+//
+// Returns an error if the connection fails, the tag doesn't exist, or there's a type mismatch.
 func (client *Client) Read(tag string, data any) error {
 	err := client.checkConnection()
 	if err != nil {
@@ -108,15 +128,32 @@ func (client *Client) Read(tag string, data any) error {
 
 	case []bool:
 		elements := len(data)
-		v, err := readArray[bool](client, tag, uint16(elements))
+		count := elements / 32
+		if count*32 != elements {
+			return fmt.Errorf("slice length must be a multiple of 32 for []bool, got %d", elements)
+		}
+		if count == 1 { // special case for 1 element slice - have to read it as an atomic uint32
+			v, err := read[uint32](client, tag)
+			if err != nil {
+				return err
+			}
+			for i := 0; i < 32; i++ {
+				data[i] = (v & (1 << i)) != 0
+			}
+			return nil
+		}
+		v, err := readArray[uint32](client, tag, uint16(count))
 		if err != nil {
 			return err
 		}
-		if len(v) != elements {
+		if len(v) != count {
 			return fmt.Errorf("got %d instead of %d elements", len(v), elements)
 		}
-		for i := range data {
-			data[i] = v[i]
+		for word := range v {
+			for i := 0; i < 32; i++ {
+				bit := word*32 + i
+				data[bit] = (v[word] & (1 << i)) != 0
+			}
 		}
 		return nil
 	case []byte:
@@ -249,6 +286,29 @@ func (client *Client) Read(tag string, data any) error {
 			data[i] = v[i]
 		}
 		return nil
+	case []string:
+		elements := len(data)
+		v, err := readArray[string](client, tag, uint16(elements))
+		if err != nil {
+			return err
+		}
+		if len(v) != elements {
+			return fmt.Errorf("got %d instead of %d elements", len(v), elements)
+		}
+		for i := range data {
+			data[i] = v[i]
+		}
+		return nil
+	case *any:
+		// could be anything?
+		val, err := client.Read_single(tag, CIPTypeStruct, 1)
+		if err != nil {
+			return err
+		}
+		reflect.ValueOf(data).Elem().Set(reflect.ValueOf(val))
+
+		return nil
+
 	case []interface{}:
 		// a pointer to a struct.
 		val, err := client.Read_single(tag, CIPTypeStruct, 1)
@@ -301,7 +361,8 @@ func (client *Client) Read(tag string, data any) error {
 
 		b := bytes.NewBuffer(dat)
 		//TODO: unpack here instead of just a read.
-		err = binary.Read(b, binary.LittleEndian, data)
+		//err = binary.Read(b, binary.LittleEndian, data)
+		_, err = Unpack(b, data)
 		if err != nil {
 			return fmt.Errorf("couldn't parse str data element %w", err)
 		}
@@ -311,11 +372,32 @@ func (client *Client) Read(tag string, data any) error {
 	return nil
 }
 
-// Read a single tag with the datatype given by a parameter instead of inferred from a pointer.
+// Read_single reads a single tag with an explicitly specified data type instead of inferring the type from a pointer.
 //
-// To read data of an unknown type, use CIPTypeUnknown for the data type.
+// This function allows you to read tags when the data type is not known at compile time. Use CIPType_Unknown
+// to read a tag of unknown type - the PLC will return the actual data type and value.
 //
-// The data is returned as an interface{} so you'll probably have to type assert it.
+// Parameters:
+//   - tag: The name of the tag to read (case insensitive)
+//   - datatype: The expected CIP data type (use CIPType_Unknown for auto-detection)
+//   - elements: Number of elements to read (1 for scalar values)
+//
+// Returns the data as interface{}, which you'll need to type assert to the appropriate Go type.
+//
+// Examples:
+//
+//	// Read a tag of known type
+//	value, err := client.Read_single("TestInt", CIPType_INT, 1)
+//	intValue := value.(int16)
+//
+//	// Read a tag of unknown type
+//	value, err := client.Read_single("UnknownTag", CIPType_Unknown, 1)
+//
+//	// Read multiple elements
+//	values, err := client.Read_single("IntArray", CIPType_INT, 5)
+//	intSlice := values.([]interface{})
+//
+// For strongly-typed reading, use the Read function instead. For multiple tags, use ReadMulti or ReadMap.
 func (client *Client) Read_single(tag string, datatype CIPType, elements uint16) (any, error) {
 
 	err := client.checkConnection()
@@ -340,9 +422,10 @@ func (client *Client) Read_single(tag string, datatype CIPType, elements uint16)
 	// setup item
 	reqItems[1] = newItem(cipItem_ConnectedData, readMsg)
 	// add path
-	reqItems[1].Serialize(ioi.Bytes())
-	// add service specific data
-	reqItems[1].Serialize(elements)
+	err = reqItems[1].Serialize(ioi, elements)
+	if err != nil {
+		return nil, fmt.Errorf("problem serializing ioi: %w", err)
+	}
 
 	itemData, err := serializeItems(reqItems)
 	if err != nil {
@@ -375,17 +458,35 @@ func (client *Client) Read_single(tag string, datatype CIPType, elements uint16)
 
 	if hdr2.Type == CIPTypeStruct {
 		if datatype == CIPTypeSTRING {
-			str_hdr := cipStringHeader{}
-			err = items[1].DeSerialize(&str_hdr)
-			if err != nil {
-				return nil, fmt.Errorf("couldn't unpack struct header. %w", err)
+			if elements == 1 {
+				str_hdr := cipStringHeader{}
+				err = items[1].DeSerialize(&str_hdr)
+				if err != nil {
+					return nil, fmt.Errorf("couldn't unpack struct header. %w", err)
+				}
+				str := make([]byte, str_hdr.Length)
+				err = items[1].DeSerialize(&str)
+				if err != nil {
+					return nil, fmt.Errorf("couldn't unpack struct data. %w", err)
+				}
+				return str, nil
 			}
-			str := make([]byte, str_hdr.Length)
-			err = items[1].DeSerialize(&str)
-			if err != nil {
-				return nil, fmt.Errorf("couldn't unpack struct data. %w", err)
+			response := make([]any, elements)
+
+			for i := 0; i < int(elements); i++ {
+				str_hdr := cipStringHeader{}
+				err = items[1].DeSerialize(&str_hdr)
+				if err != nil {
+					return nil, fmt.Errorf("couldn't unpack struct header. %w", err)
+				}
+				str := make([]byte, 82)
+				err = items[1].DeSerialize(&str)
+				if err != nil {
+					return nil, fmt.Errorf("couldn't unpack struct data. %w", err)
+				}
+				response[i] = str[:str_hdr.Length]
 			}
-			return str, nil
+			return response, nil
 		}
 		str_hdr := cipStructHeader{}
 		err = items[1].DeSerialize(&str_hdr)
@@ -457,6 +558,7 @@ func readArray[T GoLogixTypes](client *Client, tag string, elements uint16) ([]T
 			if !ok {
 				return t, errors.New("couldn't convert to string")
 			}
+			continue
 		}
 		cast2, ok := v.(T)
 		if !ok {
@@ -514,14 +616,68 @@ type cipStringHeader struct {
 	Length  uint32
 }
 type cipStructHeader struct {
-	Unknown uint16
+	StructTypeCRC uint16
 }
 
-// Tag_str is a pointer to a struct with each field tagged with a `gologix:"TAGNAME"` tag that specifies the tag on the client.
-// The types of each field need to correspond to the correct CIP type as mapped in types.go
+// ReadMulti reads multiple tags efficiently in a single request using struct field tags or a map.
+// Any curly bracketed numbers in the tag path will be replaced with the optional arguments passed in
+// in order. For example, "MyTag{0}.This" with an argument of 5 will read "MyTag5.This". This allows
+// you to use a single struct as a template for reading multiple similar tags without having to define
+// a separate struct for each instance.
 //
-// To read multiple tags without creating a tagged struct, use the ReadList() or ReadMap() functions instead.
-func (client *Client) ReadMulti(tag_str any) error {
+// This function supports two input types:
+//
+//  1. Struct with gologix field tags:
+//     Each field should have a `gologix:"tagname"` tag specifying the PLC tag to read.
+//     Field types must match the corresponding CIP types as documented in types.go.
+//
+//     Example:
+//     type MyTags struct {
+//     IntTag    int16     `gologix:"TestInt"`
+//     RealTag   float32   `gologix:"TestReal"`
+//     ArrayTag  []int32   `gologix:"TestDintArr[2]"`  // Read 5 elements starting at index 2
+//     }
+//     var tags MyTags
+//     tags.ArrayTag = make([]int32, 5)  // Pre-allocate slice
+//     err := client.ReadMulti(&tags)
+//
+//  2. Map[string]any:
+//     Keys are tag names, values are variables with correct types.
+//     The function updates the map values with data from the PLC.
+//
+//     Example:
+//     m := map[string]any{
+//     "TestInt":         int16(0),
+//     "TestReal":        float32(0),
+//     "TestDintArr[2]":  make([]int32, 5),
+//     }
+//     err := client.ReadMulti(m)
+//
+// For struct-based reading without field tags, or when working with maps exclusively,
+// use ReadMap instead. For reading tags with different types, use ReadList.
+//
+// ReadMulti automatically splits large requests across multiple messages if needed
+// to stay within connection size limits.
+//
+// Example of using arguments for dynamic tag paths:
+//
+//	type Alarms struct {
+//	    Value int32 `gologix:"Machine_{0}.Alarms"`
+//	}
+//	var machine1 Alarms
+//	err := client.ReadMulti(&machine1, 0)  // Reads "Machine_0.Alarms"
+//	var machine2 Alarms
+//	err := client.ReadMulti(&machine2, 1)  // Reads "Machine_1.Alarms"
+//
+//
+//	type SubsystemAlarms struct {
+//	    Value int32 `gologix:"Machine_{0}.{1}.Alarms"`
+//	}
+//	var pusherAlarms SubsystemAlarms
+//	err := client.ReadMulti(&machine1, 0, "pusher")  // Reads "Machine_0.pusher.Alarms"
+//	var welderAlarms SubsystemAlarms
+//	err := client.ReadMulti(&machine2, 1, "welder")  // Reads "Machine_1.welder.Alarms"
+func (client *Client) ReadMulti(tag_str any, args ...any) error {
 	switch x := tag_str.(type) {
 	case map[string]any:
 		return client.ReadMap(x)
@@ -535,26 +691,32 @@ func (client *Client) ReadMulti(tag_str any) error {
 	// build the tag list from the structure by reflecting through the tags on the fields of the struct.
 	T := reflect.TypeOf(tag_str).Elem()
 	vf := reflect.VisibleFields(T)
+	taglist := make([]tagDesc, 0, len(vf))
 	tags := make([]string, 0)
-	types := make([]CIPType, 0)
-	elements := make([]int, 0)
 	tag_map := make(map[string]int)
 	val := reflect.ValueOf(tag_str).Elem()
 	for i := range vf {
 		field := vf[i]
 		tagPath, ok := field.Tag.Lookup("gologix")
-		if !ok {
+		if !ok || tagPath == "" {
 			continue
 		}
+		if args != nil {
+			tagPath = formatName(tagPath, args...)
+		}
 		v := val.Field(i).Interface()
-		ct, elem := GoVarToCIPType(v)
-		types = append(types, ct)
-		elements = append(elements, elem)
+		t, elem := GoVarToCIPType(v)
 		tags = append(tags, tagPath)
 		tag_map[tagPath] = i
+		taglist = append(taglist, tagDesc{
+			TagName:  tagPath,
+			TagType:  t,
+			Elements: elem,
+			Struct:   v,
+		})
 	}
 
-	result_values, err := client.ReadList(tags, types, elements)
+	result_values, err := client.readList(taglist)
 	if err != nil {
 		return fmt.Errorf("problem in read list: %w", err)
 	}
@@ -585,6 +747,7 @@ type tagDesc struct {
 	TagName  string
 	TagType  CIPType
 	Elements int
+	Struct   any
 }
 
 func (client *Client) readList(tags []tagDesc) ([]any, error) {
@@ -635,12 +798,25 @@ func (client *Client) readList(tags []tagDesc) ([]any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("problem writing ioi buffer to msg buffer. %w", err)
 		}
+
+		totalMsgSize := b.Len() + SizeOf(h) + SizeOf(f) + 2 // 2 for the jump table entry
 		// TODO: calculate the actual message size, not just the IOI data size.
 		// TODO: We also need to calculate the response size we expect from the PLC and split
 		//       into multiple messages on that also.
-		if b.Len() > int(client.ConnectionSize) {
-			// TODO: split this read up into multiple messages.
-			return nil, fmt.Errorf("maximum read message size is %d", client.ConnectionSize)
+		if totalMsgSize > int(client.ConnectionSize) {
+			first_part := tags[:i]
+			rest := tags[i:]
+
+			results0, err := client.readList(first_part)
+			if err != nil {
+				return nil, fmt.Errorf("problem reading first part of tags: %w", err)
+			}
+			results1, err := client.readList(rest)
+			if err != nil {
+				return nil, fmt.Errorf("problem reading second part of tags: %w", err)
+			}
+			return append(results0, results1...), nil
+
 		}
 	}
 
@@ -648,9 +824,10 @@ func (client *Client) readList(tags []tagDesc) ([]any, error) {
 	// the item's data and the service code actually starts the next portion of the message.  But the item's header length reflects
 	// the total data so maybe not.
 	reqItems[1] = CIPItem{Header: cipItemHeader{ID: cipItem_ConnectedData}}
-	reqItems[1].Serialize(ioi_header)
-	reqItems[1].Serialize(jump_table)
-	reqItems[1].Serialize(&b)
+	err := reqItems[1].Serialize(ioi_header, jump_table, &b)
+	if err != nil {
+		return nil, fmt.Errorf("problem serializing item header: %w", err)
+	}
 
 	itemData, err := serializeItems(reqItems)
 	if err != nil {
@@ -732,7 +909,7 @@ func (client *Client) readList(tags []tagDesc) ([]any, error) {
 			return nil, fmt.Errorf("wasn't a response service. Got %v", rHdr.Service)
 		}
 		rHdr.Service = rHdr.Service.UnResponse()
-		if rHdr.Status != 0 {
+		if rHdr.Status != uint16(CIPStatus_OK) {
 			return nil, fmt.Errorf("problem reading %v. Status %v", tags[i], rHdr.Status)
 		}
 		if tags[i].Elements == 1 {
@@ -760,6 +937,26 @@ func (client *Client) readList(tags []tagDesc) ([]any, error) {
 					return nil, fmt.Errorf("couldn't unpack struct data. %w", err)
 				}
 				result_values[i] = string(str)
+			} else if rHdr.Type == CIPTypeStruct {
+				typehash := cipStructHeader{}
+				err := binary.Read(myBytes, binary.LittleEndian, &typehash)
+				if err != nil {
+					return nil, fmt.Errorf("couldn't unpack struct header. %w", err)
+				}
+				//dat := make([]byte, binary.Size(tags[i].Struct))
+				if tags[i].Struct == nil {
+					// just return the byte array.
+					result_values[i] = myBytes.Bytes()
+					continue
+				}
+				x := reflect.New(reflect.TypeOf(tags[i].Struct)).Interface()
+				err = binary.Read(myBytes, binary.LittleEndian, x)
+				if err != nil {
+					return nil, fmt.Errorf("couldn't unpack struct data. %w", err)
+				}
+				// depointer the result to the correct type.
+				y := reflect.ValueOf(x).Elem().Interface()
+				result_values[i] = y
 			} else {
 				result_values[i], err = rHdr.Type.readValue(myBytes)
 				if err != nil {
@@ -815,17 +1012,54 @@ type msgMultiReadResult struct {
 	Reserved2 byte
 }
 
-// Function for reading multiple tags at once where the tags are in a go map.
-// the keys in the map are the tag names, and the values need to be the correct type
-// for the tag.  The ReadMap function will update the values in the map to the current values
-// in the controller.
+// ReadMap reads multiple tags efficiently using a map where keys are tag names and values define the expected types.
 //
-// Example:
+// The map keys specify the tag names to read from the PLC (case insensitive).
+// The map values must be initialized with the correct Go types that correspond to the PLC tag types.
+// After the function completes successfully, the map values are updated with the current PLC values.
 //
-//		m := make(map[string]any) // define the map
-//		m["TestInt"] = int16(0) // the controller has a tag "TestInt" that is an INT
-//		m["TestDint"] = int32(0) // the controller has a tag "TestDint" that is a DINT
-//	    err = client.ReadMulti(&mr) // do the read.
+// Supported value types must match CIP types as documented in types.go:
+//   - Scalar types: int16 (INT), int32 (DINT), float32 (REAL), bool (BOOL), etc.
+//   - Arrays: pre-allocated slices like []int32, []float32, etc.
+//   - Strings: string type for STRING tags
+//   - Structs: user-defined types for UDT tags
+//
+// Examples:
+//
+//	// Basic scalar tags
+//	m := map[string]any{
+//	    "TestInt":    int16(0),      // Read INT tag
+//	    "TestDint":   int32(0),      // Read DINT tag
+//	    "TestReal":   float32(0),    // Read REAL tag
+//	    "TestBool":   false,         // Read BOOL tag
+//	    "TestString": "",            // Read STRING tag
+//	}
+//
+//	// Array tags (specify starting index and pre-allocate slice)
+//	m["TestDintArr[2]"] = make([]int32, 5)  // Read 5 DINTs starting at index 2
+//	m["TestRealArr[0]"] = make([]float32, 10) // Read 10 REALs starting at index 0
+//
+//	// UDT tags
+//	type MyUDT struct {
+//	    Field1 int32
+//	    Field2 float32
+//	}
+//	m["MyUDTTag"] = MyUDT{}
+//
+//	err := client.ReadMap(m)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	// Access the read values
+//	intValue := m["TestInt"].(int16)
+//	arrayValue := m["TestDintArr[2]"].([]int32)
+//
+// ReadMap automatically handles message splitting for large requests and optimizes
+// network usage by grouping tags into the minimum number of requests.
+//
+// For struct-based reading with field tags, use ReadMulti instead.
+// For reading tags with unknown types, set map values to nil.
 func (client *Client) ReadMap(m map[string]any) error {
 
 	err := client.checkConnection()
@@ -840,7 +1074,12 @@ func (client *Client) ReadMap(m map[string]any) error {
 	for k := range m {
 		v := m[k]
 		ct, elem := GoVarToCIPType(v)
-		tags[i] = tagDesc{TagName: k, TagType: ct, Elements: elem}
+		tags[i] = tagDesc{
+			TagName:  k,
+			TagType:  ct,
+			Elements: elem,
+			Struct:   v,
+		}
 		indexes[i] = k
 		i++
 	}

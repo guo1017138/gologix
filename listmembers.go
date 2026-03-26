@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"strings"
 )
 
 // this is specifically the response for a GetAttrList service on a
@@ -68,19 +69,31 @@ func (client *Client) GetTemplateInstanceAttr(str_instance uint32) (msgGetTempla
 	}
 
 	reqitems[1] = newItem(cipItem_ConnectedData, readmsg)
-	reqitems[1].Serialize(p.Bytes())
+	err = reqitems[1].Serialize(p.Bytes())
+	if err != nil {
+		return msgGetTemplateAttrListResponse{}, fmt.Errorf("problem serializing path: %w", err)
+	}
 	number_of_attr_to_receive := 4
 	attr_Size_32bitWords := 4
 	attr_Size_Bytes := 5
 	attr_MemberCount := 2
 	attr_symbol_type := 1
-	reqitems[1].Serialize([5]uint16{
+	err = reqitems[1].Serialize([5]uint16{
 		uint16(number_of_attr_to_receive),
 		uint16(attr_Size_32bitWords),
 		uint16(attr_Size_Bytes),
 		uint16(attr_MemberCount),
 		uint16(attr_symbol_type),
 	})
+	// the attributes for the template object are
+	// 1 uint16 = Template Handle (Is this the CRC?)
+	// 2 uint16 = Number of members
+	// 3 uint16 = Size of the template in 32 bit words
+	// 4 uint32 = Size of the template in bytes
+	// 5 uint32 = Size of the data in the template (when sent in a read response)
+	// 6 uint16 = Family type  (0 for UDT, 1 for string?)
+	// 7 uint32 = Multiply Code?
+	// 8 uint8  = Recon Data
 
 	itemdata, err := serializeItems(reqitems)
 	if err != nil {
@@ -141,6 +154,11 @@ func (m msgMemberInfo) CIPType() CIPType {
 func (client *Client) ListMembers(str_instance uint32) (UDTDescriptor, error) {
 	client.Logger.Debug("list members", "instance", str_instance)
 
+	d, ok := client.KnownTypesByID[str_instance]
+	if ok {
+		return d, nil
+	}
+
 	template_info, err := client.GetTemplateInstanceAttr(str_instance)
 
 	if err != nil {
@@ -166,11 +184,20 @@ func (client *Client) ListMembers(str_instance uint32) (UDTDescriptor, error) {
 	}
 
 	reqitems[1] = newItem(cipItem_ConnectedData, readmsg)
-	reqitems[1].Serialize(p.Bytes())
+	err = reqitems[1].Serialize(p.Bytes())
+	if err != nil {
+		return UDTDescriptor{}, fmt.Errorf("problem serializing path: %w", err)
+	}
 	start_offset := uint32(0)
 	read_length := uint16(template_info.SizeWords*4 - 23)
-	reqitems[1].Serialize(start_offset)
-	reqitems[1].Serialize(read_length)
+	err = reqitems[1].Serialize(start_offset)
+	if err != nil {
+		return UDTDescriptor{}, fmt.Errorf("problem serializing item start offset: %w", err)
+	}
+	err = reqitems[1].Serialize(read_length)
+	if err != nil {
+		return UDTDescriptor{}, fmt.Errorf("problem serializing item read length: %w", err)
+	}
 
 	itemdata, err := serializeItems(reqitems)
 	if err != nil {
@@ -217,30 +244,40 @@ func (client *Client) ListMembers(str_instance uint32) (UDTDescriptor, error) {
 	descriptor.Instance_ID = str_instance
 	descriptor.Members = make([]UDTMemberDescriptor, template_info.MemberCount)
 
-	struct_name, err := data2.ReadString(0x3B)
+	struct_name, err := data2.ReadString(0x00)
 	if err != nil {
 		return UDTDescriptor{}, fmt.Errorf("couldn't read struct name. %w", err)
+	}
+
+	if strings.Contains(struct_name, ";") {
+		struct_name = strings.Split(struct_name, ";")[0]
 	}
 	struct_name = struct_name[:len(struct_name)-1]
 	descriptor.Name = struct_name
 
-	_, err = data2.ReadString(0x00)
-	if err != nil {
-		return UDTDescriptor{}, fmt.Errorf("couldn't read unknown data. %w", err)
-	}
-
 	for i := 0; i < int(template_info.MemberCount); i++ {
 
 		fieldname, err := data2.ReadString(0x00)
-		if err != nil {
+		if err != nil && fieldname == "" {
 			return UDTDescriptor{}, fmt.Errorf("couldn't read field name. %w", err)
 		}
 		fieldname = fieldname[:len(fieldname)-1]
 
 		descriptor.Members[i].Name = fieldname
 		descriptor.Members[i].Info = memberInfos[i]
+		id := descriptor.Members[i].Template_ID()
+		if id != 0 {
+			// this is a UDT
+			d2, err := client.ListMembers(uint32(descriptor.Members[i].Template_ID()))
+			if err == nil {
+				descriptor.Members[i].UDT = &d2
+			} else {
+				client.Logger.Debug("couldn't get udt", "name", fieldname, "type", descriptor.Members[i].Info.Type)
+			}
+		}
 	}
 
+	client.KnownTypesByID[str_instance] = descriptor
 	return descriptor, nil
 }
 
@@ -270,4 +307,20 @@ func (u UDTDescriptor) Size() int {
 type UDTMemberDescriptor struct {
 	Name string
 	Info msgMemberInfo
+	UDT  *UDTDescriptor
+}
+
+func (u *UDTMemberDescriptor) Template_ID() uint16 {
+	val := u.Info.Type
+	template_mask := uint16(0b0000_1111_1111_1111) // spec says first 11 bits, but built-in types use 12th.
+	bit12 := uint16(1 << 12)
+	bit15 := uint16(1 << 15)
+	b12_set := val&bit12 != 0
+	b15_set := val&bit15 != 0
+	if !b15_set || b12_set {
+		// not a template
+		return 0
+	}
+
+	return val & template_mask
 }

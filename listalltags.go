@@ -3,6 +3,7 @@ package gologix
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -42,7 +43,7 @@ func (f TagInfo) Atomic() bool {
 // see page 42 of 1756-PM020H-EN-P
 func (f TagInfo) Template_ID() uint16 {
 	val := binary.LittleEndian.Uint16([]byte{byte(f.Type), f.TypeInfo})
-	template_mask := uint16(0b0000_0111_1111_1111)
+	template_mask := uint16(0b0000_1111_1111_1111) // spec says first 11 bits, but built-in types use 12th.
 	bit12 := uint16(1 << 12)
 	bit15 := uint16(1 << 15)
 	b12_set := val&bit12 != 0
@@ -63,26 +64,80 @@ type msgListInstanceHeader struct {
 	Status        uint16
 }
 
-// Get all the tags on the device starting at start_instance.  Generally you would call this as ListAllTags(0) to get them all.
-// Once the function returns without error, you can access the results of the listing by looking at the client.KnownTags map
+// ListAllTags discovers and catalogs all tags available in the PLC, starting from the specified instance ID.
 //
-// the gist here is that we want to do a fragmented read (since there will undoubtedly be more than one packet's worth)
-// of the instance attribute list of the symbol objects.
+// This function performs a comprehensive scan of the PLC's symbol table to build a complete inventory
+// of available tags. The discovered tags are stored in the client's KnownTags map for later reference.
 //
-// see 1756-PM020H-EN-P March 2022 page 39
-// also see https://forums.mrclient.com/index.php?/topic/40626-reading-and-writing-io-tags-in-plc/
+// The function automatically handles:
+//   - Controller-scoped tags (global tags)
+//   - Program-scoped tags (tags within program instances)
+//   - Array tags with dimension information
+//   - UDT (User Defined Type) tags with structure definitions
+//   - Fragmented responses for large tag lists
+//
+// Parameters:
+//   - start_instance: The symbol instance ID to start scanning from (use 0 to scan all tags)
+//
+// After successful completion, access the discovered tags via:
+//   - client.KnownTags: map[string]KnownTag containing all discovered tags (keyed by lowercase name)
+//   - client.KnownPrograms: slice of discovered program instances
+//   - client.KnownTypes: map of UDT definitions
+//
+// Examples:
+//
+//	// Discover all tags in the PLC
+//	err := client.ListAllTags(0)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	// Access discovered tags
+//	for tagName, tag := range client.KnownTags {
+//	    fmt.Printf("Tag: %s, Type: %s, Array: %v\n",
+//	        tag.Name, tag.Info.Type, tag.Array_Order)
+//	}
+//
+//	// Find a specific tag
+//	if tag, exists := client.KnownTags["testint"]; exists {
+//	    fmt.Printf("Found tag: %s with type %s\n", tag.Name, tag.Info.Type)
+//	}
+//
+//	// Check if it's an array
+//	if len(tag.Array_Order) > 0 {
+//	    fmt.Printf("Array dimensions: %v\n", tag.Array_Order)
+//	}
+//
+// Note: This operation can take significant time on PLCs with large numbers of tags.
+//
+// The function automatically calls ListAllPrograms() first when start_instance is 0
+// to ensure program-scoped tags are properly discovered and categorized.
 func (client *Client) ListAllTags(start_instance uint32) error {
 	const minimumTagValue = 1
 	if start_instance < minimumTagValue {
 		start_instance = minimumTagValue
 	}
 
+	fallbackProgramNames := false
 	// if we are starting from scratch, we should list all the programs first so we have
 	// their instance IDs when we come across program scoped tags.
 	if start_instance == 1 {
-		client.ListAllPrograms()
+		err := client.ListAllPrograms()
+		if err != nil {
+			var cipErr CIPStatusError
+			if errors.As(err, &cipErr) {
+				fallbackProgramNames = true
+				client.KnownPrograms = make(map[string]*KnownProgram)
+			} else {
+				return fmt.Errorf("problem listing programs: %w", err)
+			}
+		}
 		for _, p := range client.KnownPrograms {
-			client.ListSubTags(p, 1)
+			_, err := client.ListSubTags(p, 1)
+			if err != nil {
+				return fmt.Errorf("problem listing sub tags for %s: %w", p.Name, err)
+			}
+
 		}
 	}
 
@@ -105,18 +160,24 @@ func (client *Client) ListAllTags(start_instance uint32) error {
 	// setup item
 	reqItems[1] = newItem(cipItem_ConnectedData, readMsg)
 	// add path
-	reqItems[1].Serialize(path.Bytes())
+	err = reqItems[1].Serialize(path.Bytes())
+	if err != nil {
+		return fmt.Errorf("problem serializing path: %w", err)
+	}
 	// add service specific data
 	number_of_attr_to_receive := 3
 	attr1_symbol_name := 1
 	attr2_symbol_type := 2
 	attr8_arrayDims := 8
-	reqItems[1].Serialize([4]uint16{
+	err = reqItems[1].Serialize([4]uint16{
 		uint16(number_of_attr_to_receive),
 		uint16(attr1_symbol_name),
 		uint16(attr2_symbol_type),
 		uint16(attr8_arrayDims),
 	})
+	if err != nil {
+		return fmt.Errorf("problem serializing item data: %w", err)
+	}
 
 	itemData, err := serializeItems(reqItems)
 	if err != nil {
@@ -160,6 +221,8 @@ func (client *Client) ListAllTags(start_instance uint32) error {
 		if err != nil {
 			return fmt.Errorf("problem reading tag header. %w", err)
 		}
+		start_instance = tag_hdr.InstanceID
+
 		tag_name := make([]byte, tag_hdr.NameLength)
 		err = binary.Read(data2, binary.LittleEndian, &tag_name)
 		if err != nil {
@@ -205,7 +268,21 @@ func (client *Client) ListAllTags(start_instance uint32) error {
 		if len(tag_string) > 8 {
 			if strings.HasPrefix(tag_string, "Program:") {
 				// we have a program scoped tag.  These are read separately.
-				continue
+				if !fallbackProgramNames {
+					continue
+				}
+				progName := strings.TrimPrefix(tag_string, "Program:")
+				if progName == "" {
+					// no program name after prefix; skip creating an invalid KnownProgram
+					continue
+				}
+				p := &KnownProgram{Name: progName}
+				client.KnownPrograms[strings.ToLower(p.Name)] = p
+				_, err := client.ListSubTags(p, 1)
+				if err != nil {
+					return fmt.Errorf("problem listing sub tags for %s: %w", p.Name, err)
+				}
+
 			}
 		}
 
@@ -213,7 +290,7 @@ func (client *Client) ListAllTags(start_instance uint32) error {
 			client.Logger.Debug("found UDT of some sort", "name", kt.Name)
 		}
 
-		if tag_ftr.Template_ID() != 0 && !tag_ftr.PreDefined() {
+		if tag_ftr.Template_ID() != 0 { //&& !tag_ftr.PreDefined() {
 			client.Logger.Debug("Looking up template", "tag name", tag_string)
 			u, err := client.ListMembers(uint32(tag_ftr.Template_ID()))
 			if err != nil {
@@ -222,21 +299,21 @@ func (client *Client) ListAllTags(start_instance uint32) error {
 					"header", tag_hdr,
 					"footer", tag_ftr,
 					"template ID", tag_ftr.Template_ID(),
-					"predefined", tag_ftr.PreDefined())
+					"predefined", tag_ftr.PreDefined(),
+					"error", err)
 				//return err
 			} else {
 				kt.UDT = &u
-				client.Logger.Error("Successful member read for %s", "name", kt.Name)
+				client.Logger.Debug("Successful member read for %s", "name", kt.Name)
+				client.KnownTypes[u.Name] = u
 			}
 		}
 
 		client.KnownTags[strings.ToLower(string(tag_name))] = kt
 
-		start_instance = tag_hdr.InstanceID
-
 	}
 
-	if data_hdr.Status == 6 { //} && start_instance < 200 {
+	if data_hdr.Status == uint16(CIPStatus_PartialTransfer) { //} && start_instance < 200 {
 		err = client.ListAllTags(start_instance)
 		if err != nil {
 			return err
@@ -249,7 +326,13 @@ func (client *Client) ListAllTags(start_instance uint32) error {
 // per 1756-PM020H-EN-P page 43 there are some conditions in which we should discard the tags
 // because they aren't valid for reading/writing.
 func isValidTag(tag_string string, tag_ftr TagInfo) bool {
-	if tag_string[:2] == "__" {
+	// Check for empty string
+	if tag_string == "" {
+		return false
+	}
+
+	// Check for system tags (start with __)
+	if strings.HasPrefix(tag_string, "__") {
 		return false
 	}
 	if strings.Contains(tag_string, ":") {

@@ -11,6 +11,15 @@ import (
 	"time"
 )
 
+type connectionStatus int
+
+const (
+	connectionStatusDisconnected connectionStatus = iota
+	connectionStatusConnecting
+	connectionStatusConnected
+	connectionStatusDisconnecting
+)
+
 // you have to change this read sequencer every time you make a new tag request.  If you don't, you
 // won't get an error but it will return the last value you requested again.
 // You don't even have to keep incrementing it.  just going back and forth between 1 and 0 works OK.
@@ -46,7 +55,9 @@ type Controller struct {
 type Client struct {
 	Controller Controller
 
-	SerialNumber uint32 // serial number for the client
+	// serial number for the client.  This is set to a random value when the client is created.
+	// if you need to set it to a specific value, do so before calling Connect().
+	SerialNumber uint32
 	VendorId     uint16 // vendor id for the client as determined from ODVA
 
 	// Used for the keepalive messages.
@@ -59,6 +70,7 @@ type Client struct {
 	KeepAliveProps     []CIPAttribute // properties monitored during keep alive
 	KeepAliveFrequency time.Duration
 	keepAliveRunning   bool
+	KeepAlivePollTags  bool
 
 	RPI time.Duration // Request Packet Interval
 
@@ -66,24 +78,26 @@ type Client struct {
 	// it maps tag names to a struct which has, among other things, the instance ID and class
 	// which can be used to read the tag more efficiently than sending the ascii tag name to the
 	// controller.  If you don't want to use this, set SocketTimeout to 0 and never call ListAllTags
-	KnownTags     map[string]KnownTag
-	KnownPrograms map[string]*KnownProgram
+	KnownTags      map[string]KnownTag
+	KnownTypes     map[string]UDTDescriptor
+	KnownTypesByID map[uint32]UDTDescriptor
+	KnownPrograms  map[string]*KnownProgram
 
 	// used for optimization.  v20 and before vs v21 and after have different
 	// tag reading functionality.
 	knownFirmware int
 
-	mutex                  sync.Mutex
-	conn                   net.Conn
+	// protects the connection and connection status
+	mutex      sync.Mutex
+	conn       net.Conn
+	connStatus connectionStatus
+
 	SessionHandle          uint32
 	OTNetworkConnectionID  uint32
 	HeaderSequenceCounter  uint16
 	ConnectionSize         uint16
 	ConnectionSerialNumber uint16
 	Context                uint64 // fun fact - rockwell PLCs don't mind being rick rolled.
-	connected              bool
-	connecting             bool
-	disconnecting          bool
 	sequenceNumber         atomic.Uint32
 
 	cancel_keepalive chan struct{}
@@ -93,18 +107,46 @@ type Client struct {
 	ioi_cache_lock sync.Mutex
 
 	// Replace this to capture logs
-	Logger        *slog.Logger
+	Logger        LoggerInterface
 	logger_ip_set bool
 }
 
-// Create a client with reasonable defaults for the given ip address.
+// NewClient creates a new PLC client with reasonable defaults for the given IP address.
 //
-// Before using the client, you will probably want to call Connect().
-// After connecting be sure to call disconnect() when you are done with the client.  Probably a good place for a defer.
+// You must call Connect() before using the client for tag operations.
+// Always call Disconnect() when finished (preferably with defer).
 //
-// Default path is back plane, slot 0.  For devices that aren't in a rack and aren't control or compact logix,
-// such as the micro800 series or io modules, etc...  you probably want to change the path to []byte{}
-// after creating the client with this function.
+// For devices not in a ControlLogix/CompactLogix rack (such as Micro800 series,
+// PowerFlex drives, or I/O modules), change the path after creation:
+//
+//	client := gologix.NewClient("192.168.1.100")
+//	client.Controller.Path = &bytes.Buffer{}  // Empty path for some devices
+//
+// For PLCs in different slots, update the path:
+//
+//	client.Controller.Path, _ = gologix.ParsePath("1,2")  // Backplane, slot 2
+//
+// Other common configurations:
+//
+//	client.SocketTimeout = time.Second * 30        // Longer timeout
+//	client.AutoConnect = true                      // Auto-reconnect on failures
+//	client.KeepAliveAutoStart = true              // Enable connection keepalive
+//	client.Logger = slog.Default()               // Enable logging
+//
+// Example:
+//
+//	client := gologix.NewClient("192.168.1.100")
+//	err := client.Connect()
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer client.Disconnect()
+//
+//	var value int16
+//	err = client.Read("TestInt", &value)
+//
+// Returns a configured client ready for connection. The IP address parameter
+// should be the IPv4 address of the PLC as a string (e.g., "192.168.1.100").
 func NewClient(ip string) *Client {
 	// default path is back plane -> slot 0
 	path, err := ParsePath("1,0")
@@ -126,9 +168,12 @@ func NewClient(ip string) *Client {
 		KeepAliveProps:     []CIPAttribute{1, 2, 3, 4, 10},
 		RPI:                rpiDefault,
 		SocketTimeout:      socketTimeoutDefault,
+		SerialNumber:       rand.Uint32(),
 		KnownTags:          make(map[string]KnownTag),
+		KnownTypes:         make(map[string]UDTDescriptor),
+		KnownTypesByID:     make(map[uint32]UDTDescriptor),
 		ioi_cache:          make(map[string]*tagIOI),
-		Logger:             slog.Default(),
+		Logger:             NewLogger(),
 	}
 
 }
@@ -139,6 +184,16 @@ type KnownProgram struct {
 }
 
 func (kp KnownProgram) Bytes() []byte {
+	if kp.ID == 0 {
+		b := bytes.Buffer{}
+		x, err := marshalIOIPart("Program:" + kp.Name)
+		if err != nil {
+			slog.Warn("could not marshal to bytes", "KnownProgram", kp)
+			return b.Bytes()
+		}
+		b.Write(x)
+		return b.Bytes()
+	}
 	b := bytes.Buffer{}
 	b.Write(CipObject_Programs.Bytes()) // 0x20 0x6B
 	b.Write(kp.ID.Bytes())

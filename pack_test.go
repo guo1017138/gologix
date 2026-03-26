@@ -3,6 +3,8 @@ package gologix
 import (
 	"bytes"
 	"testing"
+
+	"github.com/danomagnum/gologix/lgxtypes"
 )
 
 func TestPack(t *testing.T) {
@@ -47,7 +49,10 @@ func TestPack(t *testing.T) {
 	b := bytes.Buffer{}
 	//binary.Write(&b, binary.LittleEndian, s)
 
-	Pack(&b, s)
+	_, err := Pack(&b, s)
+	if err != nil {
+		t.Errorf("problem packing bytes. %v", err)
+	}
 
 	have := b.Bytes()
 
@@ -70,7 +75,7 @@ func TestPack(t *testing.T) {
 	}
 
 	have2 := S{}
-	_, err := Unpack(bytes.NewBuffer(b.Bytes()), &have2)
+	_, err = Unpack(bytes.NewBuffer(b.Bytes()), &have2)
 	if err != nil {
 		t.Errorf("problem unpacking bytes. %v", err)
 	}
@@ -125,7 +130,10 @@ func TestPack2(t *testing.T) {
 	b := bytes.Buffer{}
 	//binary.Write(&b, binary.LittleEndian, s)
 
-	Pack(&b, s)
+	_, err := Pack(&b, s)
+	if err != nil {
+		t.Errorf("problem packing bytes. %v", err)
+	}
 
 	have := b.Bytes()
 
@@ -152,7 +160,7 @@ func TestPack2(t *testing.T) {
 	}
 
 	have2 := S{}
-	_, err := Unpack(bytes.NewBuffer(b.Bytes()), &have2)
+	_, err = Unpack(bytes.NewBuffer(b.Bytes()), &have2)
 	if err != nil {
 		t.Errorf("problem unpacking bytes. %v", err)
 	}
@@ -167,20 +175,20 @@ func TestPack2(t *testing.T) {
 func TestEncodeUDT(t *testing.T) {
 
 	type UDT3 struct {
-		U3A byte
-		U3B [4]byte
+		U3A int8
+		U3B [4]int8
 	}
 
 	type UDT2 struct {
 		U2A int32
-		U2B [3]byte
+		U2B [3]int8
 		U2C UDT3
 		U2D [2]UDT3
 	}
 
 	type UDT1 struct {
-		U1A byte
-		U1B [2]byte
+		U1A int8
+		U1B [2]int8
 		U1C UDT2
 		U1D [4]UDT3
 	}
@@ -196,6 +204,139 @@ func TestEncodeUDT(t *testing.T) {
 	}
 
 	want_crc := uint16(0x5F58)
+	if crc != want_crc {
+		t.Errorf("CRC0 mismatch. Have %x Want %x", crc, want_crc)
+	}
+
+}
+
+func TestEncodeString(t *testing.T) {
+
+	encoding, crc, err := TypeEncode(lgxtypes.STRING{})
+	if err != nil {
+		t.Errorf("problem encoding UDT1. %v", err)
+		return
+	}
+
+	want := "STRING,DINT,SINT[82]"
+	if encoding != want {
+		t.Errorf("encoding mismatch. Got %v want %v", encoding, want)
+	}
+
+	crc_want := uint16(0x0FCE)
+	if crc != crc_want {
+		t.Errorf("CRC mismatch. Got 0x%04x want 0x%04x", crc, crc_want)
+	}
+
+}
+
+func TestEncodeBuiltinTypes(t *testing.T) {
+
+	type TimerWrapper struct {
+		TON lgxtypes.TIMER
+	}
+	type ControlWrapper struct {
+		Control lgxtypes.CONTROL
+	}
+	type CounterWrapper struct {
+		Counter lgxtypes.COUNTER
+	}
+	type StringWrapper struct {
+		String lgxtypes.STRING
+	}
+	type TypeWithTimer struct {
+		Field0 int32
+		Flag1  bool
+		Flag2  bool
+		Timer  lgxtypes.TIMER
+		Field1 int32
+	}
+
+	encoding, crc, err := TypeEncode(TimerWrapper{})
+	if err != nil {
+		t.Errorf("problem encoding UDT1. %v", err)
+		return
+	}
+	want := "TimerWrapper,TIMER,DINT,DINT,DINT"
+	if encoding != want {
+		t.Errorf("ResultMismatch.\n Have %v\n Want %v\n", encoding, want)
+	}
+
+	want_crc := uint16(0xC23B)
+	if crc != want_crc {
+		t.Errorf("CRC0 mismatch. Have %x Want %x", crc, want_crc)
+	}
+
+	encoding, crc, err = TypeEncode(lgxtypes.TIMER{})
+	if err != nil {
+		t.Errorf("problem encoding UDT1. %v", err)
+		return
+	}
+	want = "TIMER,DINT,DINT,DINT"
+	if encoding != want {
+		t.Errorf("ResultMismatch.\n Have %v\n Want %v\n", encoding, want)
+	}
+
+	want_crc = uint16(0x0F83)
+	if crc != want_crc {
+		t.Errorf("CRC0 mismatch. Have %x Want %x", crc, want_crc)
+	}
+	encoding, crc, err = TypeEncode(TypeWithTimer{})
+	if err != nil {
+		t.Errorf("problem encoding UDT1. %v", err)
+		return
+	}
+	want = "TypeWithTimer,DINT,SINT,TIMER,DINT,DINT,DINT,DINT"
+	if encoding != want {
+		t.Errorf("ResultMismatch.\n Have %v\n Want %v\n", encoding, want)
+	}
+
+	want_crc = uint16(0x9a39)
+	if crc != want_crc {
+		t.Errorf("CRC0 mismatch. Have %x Want %x", crc, want_crc)
+	}
+
+	encoding, crc, err = TypeEncode(ControlWrapper{})
+	if err != nil {
+		t.Errorf("problem encoding UDT1. %v", err)
+		return
+	}
+	want = "ControlWrapper,CONTROL,DINT,DINT,DINT"
+	if encoding != want {
+		t.Errorf("ResultMismatch.\n Have %v\n Want %v\n", encoding, want)
+	}
+
+	want_crc = uint16(0x6207)
+	if crc != want_crc {
+		t.Errorf("CRC0 mismatch. Have %x Want %x", crc, want_crc)
+	}
+
+	encoding, crc, err = TypeEncode(CounterWrapper{})
+	if err != nil {
+		t.Errorf("problem encoding UDT1. %v", err)
+		return
+	}
+	want = "CounterWrapper,COUNTER,DINT,DINT,DINT"
+	if encoding != want {
+		t.Errorf("ResultMismatch.\n Have %v\n Want %v\n", encoding, want)
+	}
+
+	want_crc = uint16(0x8436)
+	if crc != want_crc {
+		t.Errorf("CRC0 mismatch. Have %x Want %x", crc, want_crc)
+	}
+
+	encoding, crc, err = TypeEncode(StringWrapper{})
+	if err != nil {
+		t.Errorf("problem encoding UDT1. %v", err)
+		return
+	}
+	want = "StringWrapper,STRING,DINT,SINT[82]"
+	if encoding != want {
+		t.Errorf("ResultMismatch.\n Have %v\n Want %v\n", encoding, want)
+	}
+
+	want_crc = uint16(0x45FD)
 	if crc != want_crc {
 		t.Errorf("CRC0 mismatch. Have %x Want %x", crc, want_crc)
 	}

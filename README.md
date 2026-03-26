@@ -1,26 +1,31 @@
 # gologix
 
-gologix is a communication driver written in native go that lets you easily read/write values from tags in Rockwell Automation ControlLogix, and CompactLogix PLC's over Ethernet I/P using GO.  PLCs that use CIP over Ethernet/IP are supported (controllogix, compactlogix, micro820).  Models like PLC5, SLC, and MicroLogix that use PCCC instead of CIP are *not* supported.
+gologix is a communication driver written in native Go that lets you easily read/write values from tags in Rockwell Automation ControlLogix and CompactLogix PLCs over Ethernet/IP using Go. PLCs that use CIP over Ethernet/IP are supported (ControlLogix, CompactLogix, Micro820). Models like PLC5, SLC, and MicroLogix that use PCCC instead of CIP are *not* supported.
 
-It is modeled after pylogix with changes to make it usable in go.
+It is modeled after pylogix with changes to make it usable in Go with a goal of being similar in usage patterns to modules of the go standard library.
 
-### Your First Client Program:
+### Client
 
-There are a few examples in the examples folder, here is an abriged version of the SimpleRead example.  See the actual example for a more thorough description of what is going on.
+The `client` lets you read and write tag data to a logix PLC.  
+
+You can read/write single tags (atomic or UDT) with `Read` by providing a pointer to the equivalent go type and it will populate the data similar to the json library. You can also read multiple tags at once with `ReadMulti`, `ReadList`, and `ReadMap`.  You can likewise write with `Write`, `WritMulti`, and `WriteMap`.  If you don't know what tag you want, you can list all the tags in a controller with `ListAllTags` or programs with `ListAllPrograms`.  To do a custom message you can use `GenericCIPMessage`.  There are also a couple other features for advanced use.
+
+There are examples for all these methods in the `examples`, `tests`, and `canned` folders. Here is an abridged version of the `/examples/SimpleRead` example. See the actual example for a more thorough description of what is going on.
 
 ```go
 package main
 
 import (
 	"fmt"
-	"gologix"
+	"log"
+	"github.com/danomagnum/gologix"
 )
 
 func main() {
 	client := gologix.NewClient("192.168.2.241")
 	err := client.Connect()
 	if err != nil {
-		log.Printf("Error opening client. %v", err)
+		log.Printf("Error opening client: %v", err)
 		return
 	}
 	defer client.Disconnect()
@@ -28,26 +33,27 @@ func main() {
 	var tag1 int16
 	err = client.Read("testint", &tag1)
 	if err != nil {
-		log.Printf("error reading testint. %v", err)
-        return
+		log.Printf("Error reading testint: %v", err)
+		return
 	}
 	log.Printf("tag1 has value %d", tag1)
 }
-
 ```
 
-### Your First Server Program:
+### Server
 
-There are a few examples in the examples folder, here is an abriged version of the Server_Class3 example.  See the actual example(s) for a more thorough description of what is going on.  Basically it listens to incoming MSG instructions doing CIP Data Table Writes and CIP Data Table Reads and maps the data to/from an internal golang map.  You can then access the data through that map as long as you get the lock on it.
+The `Server` type lets you receive MSG instructions from the controller. or behave as an IO adapter.
+
+There are a few examples in the `examples` folder. Here is an abridged version of the `/examples/Server_Class3` example. See the actual example(s) for a more thorough description of what is going on. Basically, it listens to incoming MSG instructions doing CIP Data Table Writes and CIP Data Table Reads and maps the data to/from an internal Go map. You can then access the data through that map as long as you acquire the lock on it.
 
 ```go
 package main
 
 import (
-	"fmt"
-	"gologix"
+	"log"
 	"os"
-
+	"time"
+	"github.com/danomagnum/gologix"
 )
 
 func main() {
@@ -56,11 +62,10 @@ func main() {
 	p1 := gologix.MapTagProvider{}
 	path1, err := gologix.ParsePath("1,0")
 	if err != nil {
-		log.Printf("problem parsing path. %v", err)
+		log.Printf("Problem parsing path: %v", err)
 		os.Exit(1)
 	}
 	r.AddHandler(path1.Bytes(), &p1)
-
 
 	s := gologix.NewServer(&r)
 	go s.Serve()
@@ -71,38 +76,18 @@ func main() {
 		p1.Mutex.Lock()
 		log.Printf("Data 1: %v", p1.Data)
 		p1.Mutex.Unlock()
-
-
 	}
 }
-
 ```
 
+### Canned Functions
 
-### Other Features
+There is a `canned` package that can be used for common features such as reading controller fault codes or the status of forces. Look at the `/examples/Canned` directory to see how to use these. You can also use the code in `/canned/` as good examples of how to do particular things. Pull requests for extensions to the `canned` package are welcome (as are all pull requests).
 
-Can behave as a class 1 or class 3 server allowing push messages from a PLC (class 3 via MSG instruction) or implicit messaging (class 1).  See the *server examples.
+### L5X File Support
 
-You can read/write multiple tags at once by defining a struct with each field tagged with `gologix:"tagname"`.  see MultiRead in the examples directory.
+The `l5x` package provides support for working with RSLogix5000 L5X export files. This allows you to parse project files exported from Studio 5000 to extract tag information, UDT definitions, and program structure without needing a live connection to the PLC.
 
-To read multiple items from an array, pass a slice to the Read method.
-
-To read more than one arbitrary tags at once, use the ReadList method - the first parameter is a slice of tag names and the second parameter is a slice of each tags type.
-
-You can read UDTs in if you define an equivalent struct to blit the data into. Arrays of UDTs also works. (see limitation below about UDTs with packed bools)
-
-
-There is also a ```Server``` type that lets you recive msg instructions from the controller.  See "Server" in the examples folder.  It currently handles reads and writes of atomic data types (SINT, INT, DINT, REAL).  You could use this to create a "push" mechanism instead of having ot poll the controller for data changes.
-
-### Limitations
-
-You cannot write multiple items from an array at once yet, but you can do them piecewise if needed.
-
-You can write to BOOL tags but NOT to bits of integers yet (ex: "MyBool" is OK, but "MyDint.3" is NOT).  You can read from either just fine.  I think there is a "write with mask" that I'll need to implement to do this.
-
-If the UDT you're reading has bools packed in it, you'll need to use the ReadPacked() function instead of client.Read().  The plan is to eventually migrate this functionality to client.Read automatically.
-
-No UDTs or arrays in the server yet.  This will eventually be implemented and that will greatly improve functionality.
 
 ## License
 
@@ -110,5 +95,5 @@ This project is licensed under the MIT license.
 
 ## Acknowledgements
 
-* pylogix
-* go-ethernet-ip
+- pylogix
+- go-ethernet-ip

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"slices"
 	"time"
 )
 
@@ -20,22 +21,76 @@ const (
 	rpiDefault              = time.Millisecond * 2500
 )
 
-// Connect to the PLC.
-func (client *Client) Connect() error {
-	if client.disconnecting {
-		client.Logger.Debug("waiting for client to finish disconnecting before connecting")
-		for client.disconnecting {
-			time.Sleep(time.Millisecond * 10)
-		}
-	}
-	if client.connected || client.connecting {
+func (client *Client) startConnect() error {
+	client.mutex.Lock()
+	defer client.mutex.Unlock()
+	switch client.connStatus {
+	case connectionStatusConnected:
+		return fmt.Errorf("already connected")
+	case connectionStatusConnecting:
+		return fmt.Errorf("connection is already in progress")
+	case connectionStatusDisconnecting:
+		return fmt.Errorf("connection is currently disconnecting")
+	case connectionStatusDisconnected:
+		client.connStatus = connectionStatusConnecting
 		return nil
+	default:
+		return fmt.Errorf("unknown connection status: %d", client.connStatus)
 	}
-	client.connecting = true
-	defer func() { client.connecting = false }()
+}
+
+// Connect establishes a CIP connection to the PLC.
+//
+// The client must be created with NewClient() before calling Connect().
+// Connection parameters like IP address, port, path, and timeouts should be
+// configured on the client before connecting.
+//
+// Example:
+//
+//	client := gologix.NewClient("192.168.1.100")
+//
+//	// Optional: configure non-default settings
+//	client.Controller.Port = 44818
+//	client.SocketTimeout = time.Second * 30
+//
+//	err := client.Connect()
+//	if err != nil {
+//	    log.Fatal("Failed to connect:", err)
+//	}
+//	defer client.Disconnect()  // Always disconnect when done
+//
+// Connect can be called multiple times safely - if already connected, it returns an error.
+// Use Connected() to check connection status, or enable AutoConnect for automatic reconnection.
+//
+// For devices that aren't in a ControlLogix/CompactLogix rack (like Micro800 series),
+// you may need to set an empty path: client.Controller.Path = &bytes.Buffer{}
+//
+// Returns an error if the connection fails due to network issues, invalid configuration,
+// PLC unavailability, or CIP protocol errors.
+func (client *Client) Connect() error {
+	err := client.startConnect()
+	if err != nil {
+		return err
+	}
+	success := false
+	defer func() {
+		if !success {
+			client.mutex.Lock()
+			client.connStatus = connectionStatusDisconnected
+			client.mutex.Unlock()
+		}
+		if success {
+			client.mutex.Lock()
+			client.connStatus = connectionStatusConnected
+			client.mutex.Unlock()
+		}
+	}()
+
 	if client.Logger != nil {
 		if !client.logger_ip_set {
-			client.Logger = client.Logger.With(slog.String("controllerIp", client.Controller.IpAddress))
+			if cl, ok := client.Logger.(LoggerInterfaceWith); ok && cl != nil {
+				client.Logger = cl.With(slog.String("controllerIp", client.Controller.IpAddress))
+			}
 			client.logger_ip_set = true
 		}
 	}
@@ -58,7 +113,6 @@ func (client *Client) Connect() error {
 	client.sequenceNumber.Add(uint32(time.Now().UnixMilli()))
 
 	// default path is back plane -> slot 0
-	var err error
 	if client.Controller.Path == nil {
 		client.Controller.Path, err = Serialize(CIPPort{PortNo: 1}, cipAddress(0))
 		if err != nil {
@@ -92,7 +146,7 @@ func (client *Client) Connect() error {
 		}
 		err = client.forwardOpen(item)
 		if err != nil {
-			client.Logger.Warn("large forward open failed. falling back to standard forward open", slog.Any("err", err))
+			client.Logger.Warn("Large forward open failed. Not all devices support this.  Falling back to standard forward open", slog.Any("err", err))
 			client.ConnectionSize = connSizeStandardDefault
 		}
 	}
@@ -107,8 +161,8 @@ func (client *Client) Connect() error {
 			return err
 		}
 	}
-	client.connected = true
 
+	success = true
 	if client.KeepAliveAutoStart {
 		go client.KeepAlive()
 	}
@@ -116,7 +170,9 @@ func (client *Client) Connect() error {
 }
 
 func (client *Client) Connected() bool {
-	return client.connected
+	client.mutex.Lock()
+	defer client.mutex.Unlock()
+	return client.connStatus == connectionStatusConnected
 }
 
 func (client *Client) registerSession() error {
@@ -159,10 +215,12 @@ func (client *Client) KeepAlive() {
 		return
 	}
 
-	err = client.ListAllTags(0)
-	if err != nil {
-		client.Logger.Error("keepalive list tags failed", slog.Any("err", err))
-		return
+	if client.KeepAlivePollTags {
+		err = client.ListAllTags(0)
+		if err != nil {
+			client.Logger.Error("keepalive list tags failed", slog.Any("err", err))
+			return
+		}
 	}
 
 	t := time.NewTicker(client.KeepAliveFrequency)
@@ -170,7 +228,7 @@ func (client *Client) KeepAlive() {
 	for {
 		select {
 		case <-t.C:
-			if !client.connected {
+			if !client.Connected() {
 				client.Logger.Warn("keepalive failed. not connected")
 				return
 			}
@@ -178,19 +236,30 @@ func (client *Client) KeepAlive() {
 			newProps, err := client.GetAttrList(CipObject_ControllerInfo, 1, client.KeepAliveProps...)
 			if err != nil {
 				client.Logger.Error("keepalive failed", slog.Any("err", err))
-				client.Disconnect()
+				err = client.Disconnect()
+				if err != nil {
+					client.Logger.Warn("keepalive disconnect failed", slog.Any("err", err))
+				}
 				return
 			}
-			if newProps != originalProps {
-				client.Logger.Info(
-					"controller change detected. re-analyzing types",
-					slog.Any("originalProps", originalProps),
-					slog.Any("newProps", newProps),
-				)
-				err := client.ListAllTags(0)
-				if err != nil {
-					client.Logger.Warn("keepalive list tags failed.", "error", err)
-					return
+			if !slices.Equal(newProps.Rest(), originalProps.Rest()) {
+				if client.KeepAlivePollTags {
+					client.Logger.Debug(
+						"controller change detected. re-analyzing types",
+						slog.Any("originalProps", originalProps.Rest()),
+						slog.Any("newProps", newProps.Rest()),
+					)
+					err := client.ListAllTags(0)
+					if err != nil {
+						client.Logger.Warn("keepalive list tags failed.", "error", err)
+						return
+					}
+				} else {
+					client.Logger.Debug(
+						"controller change detected.",
+						slog.Any("originalProps", originalProps.Rest()),
+						slog.Any("newProps", newProps.Rest()),
+					)
 				}
 				originalProps = newProps
 			}
@@ -317,8 +386,15 @@ func (client *Client) newForwardOpenLarge() (CIPItem, error) {
 	msg.TransportTrigger = 0xA3
 	msg.ConnPathSize = byte(path.Len() / 2)
 
-	item.Serialize(msg)
-	item.Serialize(path.Bytes())
+	err = item.Serialize(msg)
+	if err != nil {
+		return item, fmt.Errorf("error serializing forward open message. %w", err)
+	}
+
+	err = item.Serialize(path.Bytes())
+	if err != nil {
+		return item, fmt.Errorf("error serializing forward open path. %w", err)
+	}
 	return item, nil
 }
 
@@ -388,8 +464,14 @@ func (client *Client) newForwardOpenStandard() (CIPItem, error) {
 	msg.TONetworkConnParams = connectionParameters
 	msg.TransportTrigger = 0xA3
 	msg.ConnPathSize = byte(path.Len() / 2)
-	item.Serialize(msg)
-	item.Serialize(path.Bytes())
+	err = item.Serialize(msg)
+	if err != nil {
+		return item, fmt.Errorf("error serializing forward open message. %w", err)
+	}
+	err = item.Serialize(path.Bytes())
+	if err != nil {
+		return item, fmt.Errorf("error serializing forward open path. %w", err)
+	}
 
 	return item, nil
 }
@@ -463,7 +545,7 @@ type msgEIPForwardOpen_Standard_Reply struct {
 }
 
 func (client *Client) checkConnection() error {
-	if !client.connected {
+	if !client.Connected() {
 		if client.AutoConnect {
 			err := client.Connect()
 			if err != nil {
@@ -505,7 +587,7 @@ func (client *Client) parseResponse(header *eipHeader, data *bytes.Buffer) ([]CI
 			return nil, fmt.Errorf("error deserializing forward open response header extended status. %w", err)
 		}
 	}
-	if respHeader.Status != 0 {
+	if respHeader.Status != CIPStatus_OK {
 		errMsg := "bad status on response"
 		client.Logger.Error(errMsg,
 			slog.Any("status", respHeader.Status),

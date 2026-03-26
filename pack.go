@@ -256,7 +256,34 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 	if refVal.Kind() == reflect.Ptr {
 		refVal = reflect.ValueOf(data).Elem()
 	}
+
 	refType := refVal.Type()
+	k := refType.Kind()
+	switch k {
+	case reflect.Slice:
+		// we have a slice of structs.  We need to unpack each one individually
+		l := refVal.Len()
+		for i := 0; i < l; i++ {
+			s, err := Unpack(r, refVal.Index(i).Addr().Interface())
+			if err != nil {
+				return n, fmt.Errorf("problem unpacking slice element %d: %w", i, err)
+			}
+			n += s
+			align := p.Align(refType.Elem())
+			if s%align != 0 {
+				s, err = r.Read(make([]byte, align-s%align))
+				if err != nil {
+					return n, fmt.Errorf("problem reading slice element padding: %w", err)
+				}
+				n += s
+			}
+		}
+		return n, nil
+
+	case reflect.Struct:
+		// continue on
+
+	}
 	for i := 0; i < refType.NumField(); i++ {
 		field := refType.Field(i)
 		// a := p.Align(field.Type)
@@ -394,10 +421,20 @@ func ReadPacked[T any](client *Client, tag string) (T, error) {
 
 }
 
+type KnownType interface {
+	TypeAbbr() (string, uint16)
+}
+
 // perform type encoding per TypeEncode_CIPRW.pdf from the rockwell site.  Also returns the abbreviated type ID
 func TypeEncode(data any) (string, uint16, error) {
 	// TODO: does this whole thing break if we have a struct with bools, what with their ZZZZZZ prefixed values and all?
 	//       I suspect it does.  The UDT type definitions won gold at the bad idea olympics.
+
+	Abbreviable, ok := data.(KnownType)
+	if ok {
+		s, t := Abbreviable.TypeAbbr()
+		return s, t, nil
+	}
 
 	encoded := ""
 	// bitpos and bitpack are for packing bits into bytes.  bitpos is the position in the byte and bitpack is the packed bits that

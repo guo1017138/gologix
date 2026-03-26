@@ -12,7 +12,7 @@ import (
 
 func TestReadArrNew(t *testing.T) {
 	tcs := getTestConfig()
-	for _, tc := range tcs.PlcList {
+	for _, tc := range tcs.TagReadWriteTests {
 		t.Run(tc.PlcAddress, func(t *testing.T) {
 			client := gologix.NewClient(tc.PlcAddress)
 			err := client.Connect()
@@ -46,7 +46,7 @@ func TestReadArrNew(t *testing.T) {
 
 func TestReadNewUDT(t *testing.T) {
 	tcs := getTestConfig()
-	for _, tc := range tcs.PlcList {
+	for _, tc := range tcs.TagReadWriteTests {
 		t.Run(tc.PlcAddress, func(t *testing.T) {
 			client := gologix.NewClient(tc.PlcAddress)
 			err := client.Connect()
@@ -75,7 +75,7 @@ func TestReadNewUDT(t *testing.T) {
 }
 func TestReadNewUDTArr(t *testing.T) {
 	tcs := getTestConfig()
-	for _, tc := range tcs.PlcList {
+	for _, tc := range tcs.TagReadWriteTests {
 		t.Run(tc.PlcAddress, func(t *testing.T) {
 			client := gologix.NewClient(tc.PlcAddress)
 			err := client.Connect()
@@ -116,7 +116,7 @@ func TestReadNewUDTArr(t *testing.T) {
 
 func TestReadBoolPack(t *testing.T) {
 	tcs := getTestConfig()
-	for _, tc := range tcs.PlcList {
+	for _, tc := range tcs.TagReadWriteTests {
 		t.Run(tc.PlcAddress, func(t *testing.T) {
 			client := gologix.NewClient(tc.PlcAddress)
 			err := client.Connect()
@@ -160,7 +160,7 @@ func TestReadBoolPack(t *testing.T) {
 
 func TestReadNew(t *testing.T) {
 	tcs := getTestConfig()
-	for _, tc := range tcs.PlcList {
+	for _, tc := range tcs.TagReadWriteTests {
 		t.Run(tc.PlcAddress, func(t *testing.T) {
 			client := gologix.NewClient(tc.PlcAddress)
 			err := client.Connect()
@@ -228,6 +228,9 @@ func testReadNew[T gologix.GoLogixTypes](t *testing.T, client *gologix.Client, t
 }
 
 func TestReadMulti(t *testing.T) {
+	// this assortment of reads is just longer than a small forward open so
+	// it will test that the library can handle multiple reads in a single forward open on some PLCs and
+	// a single forward open on others.
 	type test_str struct {
 		TestSint          int8    `gologix:"program:gologix_tests.readsint"`
 		TestInt           int16   `gologix:"program:gologix_tests.readint"`
@@ -259,7 +262,7 @@ func TestReadMulti(t *testing.T) {
 	}
 
 	tcs := getTestConfig()
-	for _, tc := range tcs.PlcList {
+	for _, tc := range tcs.TagReadWriteTests {
 		t.Run(tc.PlcAddress, func(t *testing.T) {
 			client := gologix.NewClient(tc.PlcAddress)
 			err := client.Connect()
@@ -290,7 +293,7 @@ func TestReadMulti(t *testing.T) {
 func TestReadTimeout(t *testing.T) {
 	t.Skip("requires timeout that is too long")
 	tcs := getTestConfig()
-	for _, tc := range tcs.PlcList {
+	for _, tc := range tcs.TagReadWriteTests {
 		t.Run(tc.PlcAddress, func(t *testing.T) {
 
 			client := gologix.NewClient(tc.PlcAddress)
@@ -327,7 +330,7 @@ func TestReadTimeout(t *testing.T) {
 // so we check around that value for magic numbers in the array.
 func TestReadTooManyTags(t *testing.T) {
 	tcs := getTestConfig()
-	for _, tc := range tcs.PlcList {
+	for _, tc := range tcs.TagReadWriteTests {
 		t.Run(tc.PlcAddress, func(t *testing.T) {
 			client := gologix.NewClient(tc.PlcAddress)
 			err := client.Connect()
@@ -351,14 +354,14 @@ func TestReadTooManyTags(t *testing.T) {
 			tag := "Program:gologix_tests.LongDints"
 
 			tags := make([]string, 0)
-			types := make([]gologix.CIPType, 0)
+			types := make([]any, 0)
 			elements := make([]int, 0)
 
 			tagcount := 100
 
 			for i := 0; i < tagcount; i++ {
 				tags = append(tags, fmt.Sprintf("%s[%d]", tag, i))
-				types = append(types, gologix.CIPTypeDINT)
+				types = append(types, int32(0))
 				elements = append(elements, 1)
 			}
 
@@ -398,7 +401,7 @@ func TestReadTooManyTags(t *testing.T) {
 
 func TestReadParallel(t *testing.T) {
 	tcs := getTestConfig()
-	for _, tc := range tcs.PlcList {
+	for _, tc := range tcs.TagReadWriteTests {
 		t.Run(tc.PlcAddress, func(t *testing.T) {
 			client := gologix.NewClient(tc.PlcAddress)
 			err := client.Connect()
@@ -438,6 +441,194 @@ func TestReadParallel(t *testing.T) {
 
 			close(start)
 			wg.Wait()
+
+		})
+	}
+}
+
+func TestReadBoolArray64(t *testing.T) {
+	tcs := getTestConfig()
+	for _, tc := range tcs.TagReadWriteTests {
+		t.Run(tc.PlcAddress, func(t *testing.T) {
+			client := gologix.NewClient(tc.PlcAddress)
+			err := client.Connect()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer func() {
+				err := client.Disconnect()
+				if err != nil {
+					t.Errorf("problem disconnecting. %v", err)
+				}
+			}()
+
+			tag := "Program:gologix_tests.boolarray64"
+			have := make([]bool, 64)
+			want := []bool{
+				true, false, false, false, false, false, false, false,
+				true, true, false, false, false, false, false, false,
+				true, true, true, false, false, false, false, false,
+				true, true, true, true, false, false, false, false,
+				true, true, true, true, true, false, false, false,
+				true, true, true, true, true, true, false, false,
+				true, true, true, true, true, true, true, false,
+				true, true, true, true, true, true, true, true,
+			}
+
+			err = client.Read(tag, have)
+			if err != nil {
+				t.Errorf("error reading array: %v", err)
+			}
+
+			if len(have) != len(want) {
+				t.Errorf("didn't get the right number of elements. got %v wanted %v", len(have), len(want))
+			}
+
+			for i := range want {
+				if have[i] != want[i] {
+					t.Errorf("index %d wanted %v got %v", i+1, want[i], have[i])
+				}
+			}
+		})
+	}
+}
+
+func TestReadBoolArray32(t *testing.T) {
+	tcs := getTestConfig()
+	for _, tc := range tcs.TagReadWriteTests {
+		t.Run(tc.PlcAddress, func(t *testing.T) {
+			client := gologix.NewClient(tc.PlcAddress)
+			err := client.Connect()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer func() {
+				err := client.Disconnect()
+				if err != nil {
+					t.Errorf("problem disconnecting. %v", err)
+				}
+			}()
+
+			tag := "Program:gologix_tests.boolarray"
+			have := make([]bool, 32)
+			want := []bool{
+				true, false, false, false, false, false, false, false,
+				true, true, false, false, false, false, false, false,
+				true, true, true, false, false, false, false, false,
+				true, true, true, true, false, false, false, false,
+			}
+
+			err = client.Read(tag, have)
+			if err != nil {
+				t.Errorf("error reading array: %v", err)
+			}
+
+			if len(have) != len(want) {
+				t.Errorf("didn't get the right number of elements. got %v wanted %v", len(have), len(want))
+			}
+
+			for i := range want {
+				if have[i] != want[i] {
+					t.Errorf("index %d wanted %v got %v", i+1, want[i], have[i])
+				}
+			}
+		})
+	}
+}
+
+func TestReadStringArray(t *testing.T) {
+	tcs := getTestConfig()
+	for _, tc := range tcs.TagReadWriteTests {
+		t.Run(tc.PlcAddress, func(t *testing.T) {
+			client := gologix.NewClient(tc.PlcAddress)
+			err := client.Connect()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer func() {
+				err := client.Disconnect()
+				if err != nil {
+					t.Errorf("problem disconnecting. %v", err)
+				}
+			}()
+
+			// Check if the connection size is sufficient for the test.  Right now the library
+			// doesn't identify when a single array read is larger than the connection size.
+			if client.ConnectionSize < (82+10)*10 {
+				t.Skip("Skipping test for small connection size")
+				return
+			}
+
+			tag := "Program:gologix_tests.readstrings"
+			have := make([]string, 10)
+			want := []string{
+				"a",
+				"b",
+				"cd",
+				"efg",
+				"hijk",
+				"lmnop",
+				"qrstuvw",
+				"xyz123",
+				"0123456789",
+				"9876543210",
+			}
+
+			err = client.Read(tag, have)
+			if err != nil {
+				t.Errorf("error reading array: %v", err)
+			}
+
+			if len(have) != len(want) {
+				t.Errorf("didn't get the right number of elements. got %v wanted %v", len(have), len(want))
+			}
+
+			for i := range want {
+				if have[i] != want[i] {
+					t.Errorf("index %d wanted %v got %v", i+1, want[i], have[i])
+				}
+			}
+		})
+	}
+}
+
+func TestReadUnknownType(t *testing.T) {
+	tcs := getTestConfig()
+	for _, tc := range tcs.TagReadWriteTests {
+		t.Run(tc.PlcAddress, func(t *testing.T) {
+			client := gologix.NewClient(tc.PlcAddress)
+			err := client.Connect()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer func() {
+				err := client.Disconnect()
+				if err != nil {
+					t.Errorf("problem disconnecting. %v", err)
+				}
+			}()
+
+			var result any
+			err = client.Read("Program:gologix_tests.ReadDints[0]", &result)
+			if err != nil {
+				t.Errorf("problem reading. %v", err)
+				return
+			}
+
+			// Check if the result is of type int32
+			if _, ok := result.(int32); !ok {
+				t.Errorf("expected int32, got %T", result)
+				return
+			}
+			// Check if the value is as expected
+			if result != int32(4351) {
+				t.Errorf("expected 4351, got %v", result)
+				return
+			}
 
 		})
 	}

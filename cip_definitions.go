@@ -47,15 +47,24 @@ func (p CIPAttribute) Bytes() []byte {
 }
 func (p *CIPAttribute) Read(r io.Reader) error {
 	var size cipAttributeType
-	binary.Read(r, binary.LittleEndian, &size)
+	err := binary.Read(r, binary.LittleEndian, &size)
+	if err != nil {
+		return fmt.Errorf("error reading attribute size: %w", err)
+	}
 	switch size {
 	case cipAttribute_8bit:
 		var val byte
-		binary.Read(r, binary.LittleEndian, &val)
+		err := binary.Read(r, binary.LittleEndian, &val)
+		if err != nil {
+			return fmt.Errorf("error reading 8 bit attribute: %w", err)
+		}
 		*p = CIPAttribute(val)
 		return nil
 	case cipAttribute_16bit:
-		binary.Read(r, binary.LittleEndian, p)
+		err := binary.Read(r, binary.LittleEndian, p)
+		if err != nil {
+			return fmt.Errorf("error reading 16 bit attribute: %w", err)
+		}
 		return nil
 	default:
 		return fmt.Errorf("expected 0x30 or 0x31 but got class size of %x", size)
@@ -149,20 +158,32 @@ func (p CIPInstance) Bytes() []byte {
 
 func (p *CIPInstance) Read(r io.Reader) error {
 	var size cipInstanceSize
-	binary.Read(r, binary.LittleEndian, &size)
+	err := binary.Read(r, binary.LittleEndian, &size)
+	if err != nil {
+		return fmt.Errorf("error reading instance size: %w", err)
+	}
 	switch size {
 	case cipInstance_8bit:
 		var val byte
-		binary.Read(r, binary.LittleEndian, &val)
+		err = binary.Read(r, binary.LittleEndian, &val)
+		if err != nil {
+			return fmt.Errorf("error reading 8 bit instance: %w", err)
+		}
 		*p = CIPInstance(val)
 		return nil
 	case cipInstance_16bit:
 		var val uint16
-		binary.Read(r, binary.LittleEndian, &val)
+		err = binary.Read(r, binary.LittleEndian, &val)
+		if err != nil {
+			return fmt.Errorf("error reading 16 bit instance: %w", err)
+		}
 		*p = CIPInstance(val)
 		return nil
 	case cipInstance_32bit:
-		binary.Read(r, binary.LittleEndian, p)
+		err = binary.Read(r, binary.LittleEndian, p)
+		if err != nil {
+			return fmt.Errorf("error reading 32 bit instance: %w", err)
+		}
 		return nil
 	default:
 		return fmt.Errorf("expected 0x24 or 0x25 but got class size of %x", size)
@@ -212,15 +233,24 @@ func (p CIPClass) Bytes() []byte {
 
 func (p *CIPClass) Read(r io.Reader) error {
 	var classSize cipClassSize
-	binary.Read(r, binary.LittleEndian, &classSize)
+	err := binary.Read(r, binary.LittleEndian, &classSize)
+	if err != nil {
+		return fmt.Errorf("error reading class size: %w", err)
+	}
 	switch classSize {
 	case cipClass_8bit:
 		var val byte
-		binary.Read(r, binary.LittleEndian, &val)
+		err = binary.Read(r, binary.LittleEndian, &val)
+		if err != nil {
+			return fmt.Errorf("error reading 8 bit class: %w", err)
+		}
 		*p = CIPClass(val)
 		return nil
 	case cipClass_16bit:
-		binary.Read(r, binary.LittleEndian, p)
+		err = binary.Read(r, binary.LittleEndian, p)
+		if err != nil {
+			return fmt.Errorf("error reading 16 bit class: %w", err)
+		}
 		return nil
 	default:
 		return fmt.Errorf("expected 0x20 or 0x21 but got class size of %x", classSize)
@@ -330,6 +360,10 @@ const (
 	CipObject_ControllerInfo               CIPClass = 0xAC // don't know the official name
 	CipObject_RunMode                      CIPClass = 0x8E
 	CipObject_Messages                     CIPClass = 0x8D
+	CipObject_DPIDevice                    CIPClass = 0x92
+	CipObject_DPIParams                    CIPClass = 0x93
+	CipObject_DPIFault                     CIPClass = 0x97
+	CipObject_DataTable                    CIPClass = 0xB2 // DataTable buffer for grouped tag reads
 )
 
 // from https://rockwellautomation.custhelp.com/ci/okcsFattach/get/114390_5
@@ -389,23 +423,23 @@ func (s CIPStatus) String() string {
 	case CIPStatus_OK:
 		return "OK"
 	case CIPStatus_ConnectionFailure:
-		return "ConnectionFailure"
+		return "Connection failure - A connection related service failed along the connection path."
 	case CIPStatus_ResourceUnavailable:
-		return "ResourceUnavailable"
+		return "Resource unavailable - Resources needed for the object to perform the requested service were unavailable"
 	case CIPStatus_InvalidParameterValue:
 		return "InvalidParameterValue"
 	case CIPStatus_PathSegmentError:
-		return "PathSegmentError"
+		return "Path segment error - The path segment identifier or the segment syntax was not understood by the processing node."
 	case CIPStatus_PathDestinationUnknown:
-		return "PathDestinationUnknown"
+		return "Path destination unknown - The path is referencing an object class, instance or structure element that is not known or is not contained in the processing node. Path processing shall stop when a path destination unknown error is encountered"
 	case CIPStatus_PartialTransfer:
 		return "PartialTransfer"
 	case CIPStatus_ConnectionLost:
 		return "ConnectionLost"
 	case CIPStatus_ServiceNotSupported:
-		return "ServiceNotSupported"
+		return "Service not supported - The requested service was not implemented or was not defined for this Object Class/Instance"
 	case CIPStatus_InvalidAttributeValue:
-		return "InvalidAttributeValue"
+		return "Invalid attribute value - Invalid attribute data detected"
 	case CIPStatus_AttributeListError:
 		return "AttributeListError"
 	case CIPStatus_AlreadyInRequestedMode:
@@ -415,7 +449,7 @@ func (s CIPStatus) String() string {
 	case CIPStatus_ObjectAlreadyExists:
 		return "ObjectAlreadyExists"
 	case CIPStatus_AttributeNotSettable:
-		return "AttributeNotSettable"
+		return "Attribute not settable - A request to modify a non-modifiable attribute was received."
 	case CIPStatus_PrivilegeViolation:
 		return "PrivilegeViolation"
 	case CIPStatus_DeviceStateConflict:
@@ -425,13 +459,13 @@ func (s CIPStatus) String() string {
 	case CIPStatus_FragmentationOfMessage:
 		return "FragmentationOfMessage"
 	case CIPStatus_NotEnoughData:
-		return "NotEnoughData"
+		return "Not enough data - The service did not supply enough data to perform the specified operation"
 	case CIPStatus_AttributeNotSupported:
-		return "AttributeNotSupported"
+		return "Attribute not supported - The attribute specified in the request is not supported"
 	case CIPStatus_TooMuchData:
-		return "TooMuchData"
+		return "Too much data - The service supplied more data than was expected"
 	case CIPStatus_ObjectDoesNotExist:
-		return "ObjectDoesNotExist"
+		return "Object does not exist - The object specified does not exist in the device."
 	case CIPStatus_ServiceFragmentation:
 		return "ServiceFragmentation"
 	case CIPStatus_NoStoredAttributeData:
@@ -451,7 +485,7 @@ func (s CIPStatus) String() string {
 	case CIPStatus_VendorSpecificError:
 		return "VendorSpecificError"
 	case CIPStatus_InvalidParameter:
-		return "InvalidParameter"
+		return "Invalid parameter - A parameter associated with the request was invalid. This code is used when a parameter does not meet the requirements of this specification and/or the requirements defined in an Application Object Specification"
 	case CIPStatus_WriteOnceValueOrMedium:
 		return "WriteOnceValueOrMedium"
 	case CIPStatus_InvalidReplyReceived:
@@ -463,7 +497,7 @@ func (s CIPStatus) String() string {
 	case CIPStatus_KeyFailure:
 		return "KeyFailure"
 	case CIPStatus_PathSizeInvalid:
-		return "PathSizeInvalid"
+		return "Path size invalid - The size of the path which was sent with the Service Request is either not large enough to allow the Request to be routed to an object or too much routing data was included"
 	case CIPStatus_UnexpectedAttribInList:
 		return "UnexpectedAttribInList"
 	case CIPStatus_InvalidMemberID:

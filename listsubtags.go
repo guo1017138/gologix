@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"log"
 	"strings"
 )
 
@@ -42,12 +41,18 @@ func (client *Client) ListSubTags(Program *KnownProgram, start_instance uint32) 
 	}
 
 	reqitems[1] = newItem(cipItem_ConnectedData, readmsg)
-	reqitems[1].Serialize(p.Bytes())
+	err = reqitems[1].Serialize(p.Bytes())
+	if err != nil {
+		return new_kts, fmt.Errorf("problem serializing path: %w", err)
+	}
 	number_of_attr_to_receive := 3
 	attr1_symbol_name := 1
 	attr2_symbol_type := 2
 	attr8_arraydims := 8
-	reqitems[1].Serialize([4]uint16{uint16(number_of_attr_to_receive), uint16(attr1_symbol_name), uint16(attr2_symbol_type), uint16(attr8_arraydims)})
+	err = reqitems[1].Serialize([4]uint16{uint16(number_of_attr_to_receive), uint16(attr1_symbol_name), uint16(attr2_symbol_type), uint16(attr8_arraydims)})
+	if err != nil {
+		return new_kts, fmt.Errorf("problem serializing item attribute list: %w", err)
+	}
 
 	itemdata, err := serializeItems(reqitems)
 	if err != nil {
@@ -106,10 +111,6 @@ func (client *Client) ListSubTags(Program *KnownProgram, start_instance uint32) 
 			return nil, fmt.Errorf("problem reading tag footer. %w", err)
 		}
 
-		if strings.ToLower(newtag_name) == "program:gologix_tests.testtimer" {
-			log.Printf("found it.")
-		}
-
 		kt := KnownTag{
 			Name:     newtag_name,
 			Info:     *tag_ftr,
@@ -141,7 +142,7 @@ func (client *Client) ListSubTags(Program *KnownProgram, start_instance uint32) 
 
 	}
 
-	if data_hdr.Status == 6 {
+	if data_hdr.Status == uint16(CIPStatus_PartialTransfer) {
 		_, err = client.ListSubTags(Program, start_instance)
 		if err != nil {
 			return new_kts, fmt.Errorf("problem listing subtags. %w", err)
