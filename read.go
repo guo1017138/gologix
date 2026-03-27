@@ -884,7 +884,7 @@ func (client *Client) readList(tags []tagDesc) ([]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("problem reading reply header status. %w", err)
 	}
-	if reply_hdr.Status != uint16(CIPStatus_OK) {
+	if reply_hdr.Status != uint16(CIPStatus_OK) && reply_hdr.Status != uint16(CIPStatus_EmbeddedServiceError) {
 		return nil, fmt.Errorf("service returned status %v", CIPStatus(reply_hdr.Status))
 	}
 	reply_hdr.Reply_Count, err = rItem.Uint16()
@@ -916,8 +916,11 @@ func (client *Client) readList(tags []tagDesc) ([]any, error) {
 			return nil, fmt.Errorf("wasn't a response service. Got %v", rHdr.Service)
 		}
 		rHdr.Service = rHdr.Service.UnResponse()
-		if rHdr.Status != uint16(CIPStatus_OK) {
-			return nil, fmt.Errorf("problem reading %v. Status %v", tags[i], rHdr.Status)
+		status := rHdr.Status & 0xFF
+		if status != uint16(CIPStatus_OK) {
+			// return nil, fmt.Errorf("problem reading %v. Status %v", tags[i], CIPStatus(status))
+			result_values[i] = fmt.Errorf("problem reading tag %s. Status %v", tags[i].TagName, CIPStatus(status))
+			continue
 		}
 		if tags[i].Elements == 1 {
 			if tags[i].TagType == CIPTypeBOOL && rHdr.Type != CIPTypeBOOL && iois[i].BitAccess {
