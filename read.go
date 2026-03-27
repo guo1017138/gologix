@@ -957,7 +957,8 @@ func (client *Client) readList(tags []tagDesc) ([]any, error) {
 					continue
 				}
 				x := reflect.New(reflect.TypeOf(tags[i].Struct)).Interface()
-				err = binary.Read(myBytes, binary.LittleEndian, x)
+				// err = binary.Read(myBytes, binary.LittleEndian, x)
+				_, err = Unpack(myBytes, x)
 				if err != nil {
 					return nil, fmt.Errorf("couldn't unpack struct data. %w", err)
 				}
