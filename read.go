@@ -1023,6 +1023,11 @@ type msgMultiReadResult struct {
 	Reserved2 byte
 }
 
+type msgCIPFragIOIFooter struct {
+	Elements uint16
+	Offset   uint32
+}
+
 // ReadMap reads multiple tags efficiently using a map where keys are tag names and values define the expected types.
 //
 // The map keys specify the tag names to read from the PLC (case insensitive).
@@ -1120,4 +1125,416 @@ func (client *Client) ReadMap(m map[string]any) error {
 	}
 
 	return nil
+}
+
+// ReadMapFrag reads multiple tags using CIP Fragmented Read service (0x52).
+//
+// The input map format is the same as ReadMap: map keys are tag names and map values
+// define the expected Go types to decode into. This method uses fragmented reads with
+// automatic continuation offsets to fetch large payloads reliably.
+//
+// For very large tag sets, this method may still split requests internally to fit the
+// connection size, but each chunk uses 0x52 and handles partial transfers transparently.
+func (client *Client) ReadMapFrag(m map[string]any) error {
+	err := client.checkConnection()
+	if err != nil {
+		return fmt.Errorf("could not start fragmented multi read: %w", err)
+	}
+
+	total := len(m)
+	tags := make([]tagDesc, total)
+	indexes := make([]string, total)
+	i := 0
+	for k := range m {
+		v := m[k]
+		ct, elem := GoVarToCIPType(v)
+		tags[i] = tagDesc{
+			TagName:  k,
+			TagType:  ct,
+			Elements: elem,
+			Struct:   v,
+		}
+		indexes[i] = k
+		i++
+	}
+
+	resultValues := make([]any, 0, total)
+	n := 0
+	for n < total {
+		nNew, err := client.countFragIOIsThatFit(tags[n:])
+		if err != nil {
+			return err
+		}
+		subResults, err := client.readListFragAll(tags[n : n+nNew])
+		n += nNew
+		if err != nil {
+			return err
+		}
+		resultValues = append(resultValues, subResults...)
+	}
+
+	for i := range resultValues {
+		m[indexes[i]] = resultValues[i]
+	}
+
+	return nil
+}
+
+func (client *Client) countFragIOIsThatFit(tags []tagDesc) (int, error) {
+	qty := len(tags)
+
+	ioiHeader := msgCIPConnectedMultiServiceReq{
+		Sequence:     uint16(sequencer()),
+		Service:      CIPService_MultipleService,
+		PathSize:     2,
+		Path:         [4]byte{0x20, 0x02, 0x24, 0x01},
+		ServiceCount: uint16(qty),
+	}
+
+	mainHdrSize := binary.Size(ioiHeader)
+	ioiHdrSize := binary.Size(msgCIPMultiIOIHeader{})
+	ioiFtrSize := binary.Size(msgCIPFragIOIFooter{})
+
+	b := bytes.Buffer{}
+	n := 1
+	responseSize := 0
+
+	for i, tag := range tags {
+		ioi, err := client.newIOI(tag.TagName, tag.TagType)
+		if err != nil {
+			return 0, err
+		}
+
+		newSize := mainHdrSize
+		newSize += 2 * n
+		newSize += b.Len()
+		newSize += ioiHdrSize + len(ioi.Buffer) + ioiFtrSize
+
+		responseSize += tags[i].TagType.Size() * tags[i].Elements
+		if newSize >= int(client.ConnectionSize) || responseSize >= int(client.ConnectionSize) {
+			break
+		}
+
+		h := msgCIPMultiIOIHeader{
+			Service: CIPService_FragRead,
+			Size:    byte(len(ioi.Buffer) / 2),
+		}
+		f := msgCIPFragIOIFooter{Elements: uint16(tag.Elements), Offset: 0}
+		err = binary.Write(&b, binary.LittleEndian, h)
+		if err != nil {
+			return 0, fmt.Errorf("problem writing fragmented cip IO header to buffer. %w", err)
+		}
+		b.Write(ioi.Buffer)
+		err = binary.Write(&b, binary.LittleEndian, f)
+		if err != nil {
+			return 0, fmt.Errorf("problem writing fragmented ioi footer to msg buffer. %w", err)
+		}
+
+		n = i + 1
+	}
+
+	if n < 1 {
+		n = 1
+	}
+	return n, nil
+}
+
+type fragReadTagResult struct {
+	Status CIPStatus
+	Type   CIPType
+	Data   []byte
+}
+
+func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets []uint32) ([]fragReadTagResult, error) {
+	qty := len(tags)
+	reqItems := make([]CIPItem, 2)
+	reqItems[0] = newItem(cipItem_ConnectionAddress, &client.OTNetworkConnectionID)
+
+	ioiHeader := msgCIPConnectedMultiServiceReq{
+		Sequence:     uint16(sequencer()),
+		Service:      CIPService_MultipleService,
+		PathSize:     2,
+		Path:         [4]byte{0x20, 0x02, 0x24, 0x01},
+		ServiceCount: uint16(qty),
+	}
+
+	b := bytes.Buffer{}
+	jumpTable := make([]uint16, qty)
+	jumpStart := 2 + qty*2
+	for i := 0; i < qty; i++ {
+		jumpTable[i] = uint16(jumpStart + b.Len())
+		h := msgCIPMultiIOIHeader{
+			Service: CIPService_FragRead,
+			Size:    byte(len(iois[i].Buffer) / 2),
+		}
+		f := msgCIPFragIOIFooter{
+			Elements: uint16(tags[i].Elements),
+			Offset:   offsets[i],
+		}
+
+		err := binary.Write(&b, binary.LittleEndian, h)
+		if err != nil {
+			return nil, fmt.Errorf("problem writing fragmented cip IO header to buffer. %w", err)
+		}
+		b.Write(iois[i].Buffer)
+		err = binary.Write(&b, binary.LittleEndian, f)
+		if err != nil {
+			return nil, fmt.Errorf("problem writing fragmented ioi footer to msg buffer. %w", err)
+		}
+	}
+
+	reqItems[1] = CIPItem{Header: cipItemHeader{ID: cipItem_ConnectedData}}
+	err := reqItems[1].Serialize(ioiHeader, jumpTable, &b)
+	if err != nil {
+		return nil, fmt.Errorf("problem serializing fragmented item header: %w", err)
+	}
+
+	itemData, err := serializeItems(reqItems)
+	if err != nil {
+		return nil, err
+	}
+	hdr, data, err := client.send_recv_data(cipCommandSendUnitData, itemData)
+	if err != nil {
+		return nil, err
+	}
+
+	if hdr.Status != 0 {
+		return nil, fmt.Errorf("problem reading fragmented tags. Status %v", CIPStatus(hdr.Status))
+	}
+
+	readResultHeader := msgCIPResultHeader{}
+	err = binary.Read(data, binary.LittleEndian, &readResultHeader)
+	if err != nil {
+		client.Logger.Warn("Problem reading fragmented read result header", "error", err)
+	}
+
+	items, err := readItems(data)
+	if err != nil {
+		return nil, fmt.Errorf("problem reading fragmented items. %w", err)
+	}
+	if len(items) != 2 {
+		return nil, fmt.Errorf("wrong Number of Items for fragmented read. Expected 2 but got %v", len(items))
+	}
+
+	rItem := items[1]
+	var replyHdr msgMultiReadResultHeader
+	replyHdr.SequenceCount, err = rItem.Uint16()
+	if err != nil {
+		return nil, fmt.Errorf("problem reading fragmented reply header sequence count. %w", err)
+	}
+	byt, err := rItem.Byte()
+	if err != nil {
+		return nil, fmt.Errorf("problem reading fragmented reply header service code. %w", err)
+	}
+	replyHdr.Service = CIPService(byt)
+	_, err = rItem.Byte()
+	if err != nil {
+		return nil, fmt.Errorf("problem reading fragmented reply header padding byte. %w", err)
+	}
+	replyHdr.Status, err = rItem.Uint16()
+	if err != nil {
+		return nil, fmt.Errorf("problem reading fragmented reply header status. %w", err)
+	}
+	if replyHdr.Status != uint16(CIPStatus_OK) && replyHdr.Status != uint16(CIPStatus_EmbeddedServiceError) {
+		return nil, fmt.Errorf("fragmented service returned status %v", CIPStatus(replyHdr.Status))
+	}
+	replyHdr.Reply_Count, err = rItem.Uint16()
+	if err != nil {
+		return nil, fmt.Errorf("problem reading fragmented reply item count. %w", err)
+	}
+
+	offsetTable := make([]uint16, replyHdr.Reply_Count)
+	err = binary.Read(&rItem, binary.LittleEndian, &offsetTable)
+	if err != nil {
+		return nil, fmt.Errorf("problem reading fragmented offset table. %w", err)
+	}
+	rb, err := rItem.Bytes()
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]fragReadTagResult, replyHdr.Reply_Count)
+	for i := 0; i < int(replyHdr.Reply_Count); i++ {
+		start := int(offsetTable[i]) + 10
+		end := len(rb)
+		if i+1 < int(replyHdr.Reply_Count) {
+			end = int(offsetTable[i+1]) + 10
+		}
+		if start < 0 || start > len(rb) || end < start || end > len(rb) {
+			return nil, fmt.Errorf("invalid fragmented offset boundaries for item %d", i)
+		}
+
+		entry := rb[start:end]
+		if len(entry) < SizeOf(msgMultiReadResult{}) {
+			return nil, fmt.Errorf("fragmented response entry %d too short", i)
+		}
+
+		entryBuf := bytes.NewBuffer(entry)
+		rHdr := msgMultiReadResult{}
+		err = binary.Read(entryBuf, binary.LittleEndian, &rHdr)
+		if err != nil {
+			return nil, fmt.Errorf("problem reading fragmented multi result header. %w", err)
+		}
+
+		if !rHdr.Service.IsResponse() {
+			return nil, fmt.Errorf("fragmented item %d was not a response service. Got %v", i, rHdr.Service)
+		}
+		rHdr.Service = rHdr.Service.UnResponse()
+		if rHdr.Service != CIPService_FragRead {
+			return nil, fmt.Errorf("fragmented item %d had unexpected service %v", i, rHdr.Service)
+		}
+
+		status := CIPStatus(rHdr.Status & 0xFF)
+		if status != CIPStatus_OK && status != CIPStatus_PartialTransfer {
+			results[i] = fragReadTagResult{Status: status, Type: rHdr.Type}
+			continue
+		}
+
+		payload := make([]byte, entryBuf.Len())
+		_, err = entryBuf.Read(payload)
+		if err != nil {
+			return nil, fmt.Errorf("problem reading fragmented payload for item %d: %w", i, err)
+		}
+
+		results[i] = fragReadTagResult{
+			Status: status,
+			Type:   rHdr.Type,
+			Data:   payload,
+		}
+	}
+
+	return results, nil
+}
+
+func decodeReadTagValue(tag tagDesc, ioi *tagIOI, respType CIPType, payload []byte) (any, error) {
+	myBytes := bytes.NewBuffer(payload)
+
+	if tag.Elements == 1 {
+		if tag.TagType == CIPTypeBOOL && respType != CIPTypeBOOL && ioi.BitAccess {
+			value, err := readValue(respType, myBytes)
+			if err != nil {
+				return nil, fmt.Errorf("problem reading bool tag %v: %w", tag, err)
+			}
+			return getBit(respType, value, ioi.BitPosition)
+		}
+
+		if tag.TagType == CIPTypeSTRING {
+			strHdr := cipStringHeader{}
+			err := binary.Read(myBytes, binary.LittleEndian, &strHdr)
+			if err != nil {
+				return nil, fmt.Errorf("couldn't unpack string struct header. %w", err)
+			}
+			str := make([]byte, strHdr.Length)
+			err = binary.Read(myBytes, binary.LittleEndian, str)
+			if err != nil {
+				return nil, fmt.Errorf("couldn't unpack struct data. %w", err)
+			}
+			return string(str), nil
+		}
+
+		if respType == CIPTypeStruct {
+			typehash := cipStructHeader{}
+			err := binary.Read(myBytes, binary.LittleEndian, &typehash)
+			if err != nil {
+				return nil, fmt.Errorf("couldn't unpack struct header. %w", err)
+			}
+			if tag.Struct == nil {
+				return myBytes.Bytes(), nil
+			}
+			x := reflect.New(reflect.TypeOf(tag.Struct)).Interface()
+			_, err = Unpack(myBytes, x)
+			if err != nil {
+				return nil, fmt.Errorf("couldn't unpack struct data. %w", err)
+			}
+			return reflect.ValueOf(x).Elem().Interface(), nil
+		}
+
+		return respType.readValue(myBytes)
+	}
+
+	val := make([]any, tag.Elements)
+	for i := 0; i < tag.Elements; i++ {
+		value, err := readValue(respType, myBytes)
+		if err != nil {
+			return nil, fmt.Errorf("problem reading tag %v: %w", tag, err)
+		}
+		val[i] = value
+	}
+	return val, nil
+}
+
+func (client *Client) readListFragAll(tags []tagDesc) ([]any, error) {
+	qty := len(tags)
+	iois := make([]*tagIOI, qty)
+	for i, tag := range tags {
+		var err error
+		iois[i], err = client.newIOI(tag.TagName, tag.TagType)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	offsets := make([]uint32, qty)
+	chunks := make([]bytes.Buffer, qty)
+	respTypes := make([]CIPType, qty)
+	pending := make([]int, qty)
+	for i := range pending {
+		pending[i] = i
+	}
+
+	for rounds := 0; len(pending) > 0; rounds++ {
+		if rounds > 1024 {
+			return nil, fmt.Errorf("fragmented read exceeded max continuation rounds")
+		}
+
+		roundTags := make([]tagDesc, len(pending))
+		roundIOIs := make([]*tagIOI, len(pending))
+		roundOffsets := make([]uint32, len(pending))
+		for i, idx := range pending {
+			roundTags[i] = tags[idx]
+			roundIOIs[i] = iois[idx]
+			roundOffsets[i] = offsets[idx]
+		}
+
+		roundResults, err := client.readListFragRound(roundTags, roundIOIs, roundOffsets)
+		if err != nil {
+			return nil, err
+		}
+
+		nextPending := make([]int, 0, len(pending))
+		for i, rr := range roundResults {
+			idx := pending[i]
+			if rr.Status != CIPStatus_OK && rr.Status != CIPStatus_PartialTransfer {
+				return nil, fmt.Errorf("problem reading tag %s. Status %v", tags[idx].TagName, rr.Status)
+			}
+
+			if respTypes[idx] == 0 {
+				respTypes[idx] = rr.Type
+			}
+
+			if len(rr.Data) > 0 {
+				_, err := chunks[idx].Write(rr.Data)
+				if err != nil {
+					return nil, fmt.Errorf("problem accumulating fragmented payload for %s: %w", tags[idx].TagName, err)
+				}
+				offsets[idx] += uint32(len(rr.Data))
+			}
+
+			if rr.Status == CIPStatus_PartialTransfer {
+				nextPending = append(nextPending, idx)
+			}
+		}
+		pending = nextPending
+	}
+
+	resultValues := make([]any, qty)
+	for i := range tags {
+		val, err := decodeReadTagValue(tags[i], iois[i], respTypes[i], chunks[i].Bytes())
+		if err != nil {
+			return nil, fmt.Errorf("problem decoding fragmented read value for %s: %w", tags[i].TagName, err)
+		}
+		resultValues[i] = val
+	}
+
+	return resultValues, nil
 }
