@@ -3,7 +3,9 @@ package gologix
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -252,16 +254,19 @@ func (client *Client) ListMembers(str_instance uint32) (UDTDescriptor, error) {
 	if strings.Contains(struct_name, ";") {
 		struct_name = strings.Split(struct_name, ";")[0]
 	}
-	struct_name = struct_name[:len(struct_name)-1]
+	struct_name = strings.TrimRight(struct_name, "\000")
 	descriptor.Name = struct_name
 
 	for i := 0; i < int(template_info.MemberCount); i++ {
 
 		fieldname, err := data2.ReadString(0x00)
 		if err != nil && fieldname == "" {
+			if errors.Is(err, io.EOF) {
+				continue
+			}
 			return UDTDescriptor{}, fmt.Errorf("couldn't read field name. %w", err)
 		}
-		fieldname = fieldname[:len(fieldname)-1]
+		fieldname = strings.TrimRight(fieldname, "\000")
 
 		descriptor.Members[i].Name = fieldname
 		descriptor.Members[i].Info = memberInfos[i]
