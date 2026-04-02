@@ -197,7 +197,7 @@ func (c CIPType) Size() int {
 	case CIPTypeDATETIME:
 		return 0 //?
 	case CIPTypeSTRING:
-		return 88
+		return 90 // 最大可能值
 	default:
 		return 0
 	}

@@ -156,7 +156,34 @@ func Pack(w io.Writer, data any) (int, error) {
 						}
 					}
 					continue
-
+				} else if at.Kind() == reflect.Struct {
+					l := arr.Len()
+					for ai := 0; ai < l; ai++ {
+						s, err := Pack(w, arr.Index(ai).Interface())
+						if err != nil {
+							return pos, fmt.Errorf("problem packing array element %d: %w", ai, err)
+						}
+						pos += s
+					}
+					continue
+				} else if at.Kind() == reflect.String {
+					l := arr.Len()
+					for ai := 0; ai < l; ai++ {
+						str := arr.Index(ai).String()
+						strlen := uint32(len(str))
+						err := binary.Write(w, binary.LittleEndian, strlen)
+						if err != nil {
+							return pos, fmt.Errorf("problem writing string header: %w", err)
+						}
+						b2 := make([]byte, 84)
+						copy(b2, str)
+						err = binary.Write(w, binary.LittleEndian, b2)
+						if err != nil {
+							return pos, fmt.Errorf("problem writing string payload: %w", err)
+						}
+						pos += 88
+					}
+					continue
 				}
 			case reflect.Bool:
 				// try to pack bools
@@ -178,9 +205,22 @@ func Pack(w io.Writer, data any) (int, error) {
 					pos += 1
 				}
 				continue
-
+			case reflect.String:
+				str := refVal.Field(i).String()
+				strlen := uint32(len(str))
+				err := binary.Write(w, binary.LittleEndian, strlen)
+				if err != nil {
+					return pos, fmt.Errorf("problem writing string header: %w", err)
+				}
+				b2 := make([]byte, 84)
+				copy(b2, str)
+				err = binary.Write(w, binary.LittleEndian, b2)
+				if err != nil {
+					return pos, fmt.Errorf("problem writing string payload: %w", err)
+				}
+				pos += 88
+				continue
 			}
-
 		}
 
 		// we don't have a packable bool.  First thing we need to do is check whether there are some packed bools that still need flushed out.
@@ -329,6 +369,21 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 							return n, fmt.Errorf("problem unpacking array element %d: %w", ai, err)
 						}
 						n += s
+					}
+					continue
+				} else if at.Kind() == reflect.String {
+					l := arr.Len()
+					for ai := 0; ai < l; ai++ {
+						strArray := make([]byte, 88)
+						count, err := r.Read(strArray)
+						if err != nil || count != 88 {
+							return n, fmt.Errorf("problem reading packed string. %w", err)
+						}
+						strLen := binary.LittleEndian.Uint32(strArray)
+						if strLen > 84 {
+							return n, fmt.Errorf("problem reading packed string. string length unexpected %d", strLen)
+						}
+						arr.Index(ai).SetString(string(strArray[4 : strLen+4]))
 					}
 					continue
 				}
