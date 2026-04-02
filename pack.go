@@ -321,7 +321,16 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 						}
 					}
 					continue
-
+				} else if at.Kind() == reflect.Struct {
+					l := arr.Len()
+					for ai := 0; ai < l; ai++ {
+						s, err := Unpack(r, arr.Index(ai).Addr().Interface())
+						if err != nil {
+							return n, fmt.Errorf("problem unpacking array element %d: %w", ai, err)
+						}
+						n += s
+					}
+					continue
 				}
 			case reflect.Bool:
 				// try to pack bools
