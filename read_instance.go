@@ -97,48 +97,24 @@ func (client *Client) ReadMapByInstance(m map[CIPInstance]any) error {
 	}
 
 	resultValues := make([]any, total)
+	pending := make([]int, total)
+	for i := range pending {
+		pending[i] = i
+	}
 
-	readBatches := func(indexes []int, reader func([]tagDesc, []*tagIOI) ([]any, error)) error {
-		for start := 0; start < len(indexes); {
-			remaining := len(indexes) - start
-			batchTags := make([]tagDesc, remaining)
-			batchIOIs := make([]*tagIOI, remaining)
-			for j, idx := range indexes[start:] {
-				batchTags[j] = tags[idx]
-				batchIOIs[j] = iois[idx]
-			}
-
-			nNew, err := countInstanceIOIsThatFit(client, batchTags, batchIOIs)
-			if err != nil {
-				return err
-			}
-			subResults, err := reader(batchTags[:nNew], batchIOIs[:nNew])
-			if err != nil {
-				return err
-			}
-			for j, val := range subResults {
-				resultValues[indexes[start+j]] = val
-			}
-			start += nNew
+	for len(pending) > 0 {
+		selectedOrig, chosenTags, chosenIOIs, nextPending, err := selectPackedTagBatch(client, pending, tags, iois)
+		if err != nil {
+			return err
 		}
-		return nil
-	}
-
-	atomicIndexes := make([]int, 0, total)
-	structIndexes := make([]int, 0, total)
-	for i, tag := range tags {
-		if instanceReadService(tag) == CIPService_FragRead {
-			structIndexes = append(structIndexes, i)
-			continue
+		subResults, err := client.readListFragWithIOIsAll(chosenTags, chosenIOIs)
+		if err != nil {
+			return err
 		}
-		atomicIndexes = append(atomicIndexes, i)
-	}
-
-	if err := readBatches(atomicIndexes, client.readListWithIOIs); err != nil {
-		return err
-	}
-	if err := readBatches(structIndexes, client.readListFragWithIOIsAll); err != nil {
-		return err
+		for i, val := range subResults {
+			resultValues[selectedOrig[i]] = val
+		}
+		pending = nextPending
 	}
 
 	for i := range resultValues {
@@ -166,19 +142,22 @@ func countInstanceIOIsThatFit(client *Client, tags []tagDesc, iois []*tagIOI) (i
 	b := bytes.Buffer{}
 	n := 1
 	responseSize := 0
+	responseHdrSize := binary.Size(msgMultiReadResultHeader{})
 
 	for i, tag := range tags {
 		ioi := iois[i]
 
+		candidateCount := i + 1
 		newSize := mainHdrSize
-		newSize += 2 * n
+		newSize += 2 * candidateCount
 		newSize += b.Len()
 		newSize += ioiHdrSize + len(ioi.Buffer) + instanceReadFooterSize(tag)
 
-		responseSize += estimateTagResponseSize(tag)
-		if newSize >= int(client.ConnectionSize) || responseSize >= int(client.ConnectionSize) {
+		candidateRespSize := responseHdrSize + 2*candidateCount + responseSize + estimateTagResponseSize(tag)
+		if newSize >= int(client.ConnectionSize) || candidateRespSize >= int(client.ConnectionSize) {
 			break
 		}
+		responseSize += estimateTagResponseSize(tag)
 
 		h := msgCIPMultiIOIHeader{
 			Service: instanceReadService(tag),
@@ -193,7 +172,7 @@ func countInstanceIOIsThatFit(client *Client, tags []tagDesc, iois []*tagIOI) (i
 			return 0, fmt.Errorf("problem writing ioi footer to buffer: %w", err)
 		}
 
-		n = i + 1
+		n = candidateCount
 	}
 
 	if n < 1 {

@@ -764,21 +764,136 @@ func readServiceForTag(tag tagDesc) CIPService {
 	return CIPService_Read
 }
 
+func selectPackedTagIndexes(client *Client, tags []tagDesc, iois []*tagIOI) ([]int, error) {
+	if len(tags) == 0 {
+		return nil, nil
+	}
+	if iois != nil && len(iois) != len(tags) {
+		return nil, fmt.Errorf("mismatched tag and IOI counts")
+	}
+
+	qty := len(tags)
+	ioiHeader := msgCIPConnectedMultiServiceReq{
+		Sequence:     uint16(sequencer()),
+		Service:      CIPService_MultipleService,
+		PathSize:     2,
+		Path:         [4]byte{0x20, 0x02, 0x24, 0x01},
+		ServiceCount: uint16(qty),
+	}
+
+	mainHdrSize := binary.Size(ioiHeader)
+	ioiHdrSize := binary.Size(msgCIPMultiIOIHeader{})
+	fragFtrSize := binary.Size(msgCIPFragIOIFooter{})
+	readFtrSize := binary.Size(msgCIPIOIFooter{})
+
+	selected := make([]int, 0, len(tags))
+	packedBytes := 0
+	responseHdrSize := binary.Size(msgMultiReadResultHeader{})
+	responseSize := 0
+
+	for i, tag := range tags {
+		var ioi *tagIOI
+		if iois != nil {
+			ioi = iois[i]
+		} else {
+			var err error
+			ioi, err = client.newIOI(tag.TagName, tag.TagType)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		service := readServiceForTag(tag)
+		footerSize := readFtrSize
+		if service == CIPService_FragRead {
+			footerSize = fragFtrSize
+		}
+
+		candidateCount := len(selected) + 1
+		candidateMsgSize := mainHdrSize + 2*candidateCount + packedBytes + ioiHdrSize + len(ioi.Buffer) + footerSize
+		candidateRespSize := responseHdrSize + 2*candidateCount + responseSize + estimateTagResponseSize(tag)
+		if candidateMsgSize >= int(client.ConnectionSize) || candidateRespSize >= int(client.ConnectionSize) {
+			continue
+		}
+
+		selected = append(selected, i)
+		packedBytes += ioiHdrSize + len(ioi.Buffer) + footerSize
+		responseSize += estimateTagResponseSize(tag)
+	}
+
+	if len(selected) == 0 {
+		selected = append(selected, 0)
+	}
+
+	if client.Logger != nil {
+		client.Logger.Debug("Packed Efficiency", "tags", len(selected), "bytes", client.ConnectionSize)
+	}
+	return selected, nil
+}
+
+func selectPackedTagBatch(client *Client, pending []int, tags []tagDesc, iois []*tagIOI) ([]int, []tagDesc, []*tagIOI, []int, error) {
+	if len(pending) == 0 {
+		return nil, nil, nil, nil, nil
+	}
+
+	batchTags := make([]tagDesc, len(pending))
+	var batchIOIs []*tagIOI
+	if iois != nil {
+		batchIOIs = make([]*tagIOI, len(pending))
+	}
+	for i, idx := range pending {
+		batchTags[i] = tags[idx]
+		if iois != nil {
+			batchIOIs[i] = iois[idx]
+		}
+	}
+
+	selectedLocal, err := selectPackedTagIndexes(client, batchTags, batchIOIs)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+
+	selectedOrig := make([]int, 0, len(selectedLocal))
+	chosenTags := make([]tagDesc, 0, len(selectedLocal))
+	var chosenIOIs []*tagIOI
+	if iois != nil {
+		chosenIOIs = make([]*tagIOI, 0, len(selectedLocal))
+	}
+	nextPending := make([]int, 0, len(pending)-len(selectedLocal))
+
+	selPos := 0
+	for pos, idx := range pending {
+		if selPos < len(selectedLocal) && selectedLocal[selPos] == pos {
+			selectedOrig = append(selectedOrig, idx)
+			chosenTags = append(chosenTags, tags[idx])
+			if iois != nil {
+				chosenIOIs = append(chosenIOIs, iois[idx])
+			}
+			selPos++
+			continue
+		}
+		nextPending = append(nextPending, idx)
+	}
+
+	return selectedOrig, chosenTags, chosenIOIs, nextPending, nil
+}
+
 func estimateTagResponseSize(tag tagDesc) int {
 	elements := tag.Elements
 	if elements < 1 {
 		elements = 1
 	}
 
+	resultHdrSize := binary.Size(msgMultiReadResult{})
 	if tag.TagType != CIPTypeStruct {
-		return tag.TagType.Size() * elements
+		return resultHdrSize + tag.TagType.Size()*elements
 	}
 
 	size, err := packedStructSize(tag.Struct)
 	if err != nil || size <= 0 {
-		return tag.TagType.Size() * elements
+		size = tag.TagType.Size() * elements
 	}
-	return size * elements
+	return resultHdrSize + binary.Size(cipStructHeader{}) + size
 }
 
 func packedStructSize(v any) (int, error) {
@@ -1168,48 +1283,26 @@ func (client *Client) ReadMap(m map[string]any) error {
 		i++
 	}
 	resultValues := make([]any, total)
+	pending := make([]int, total)
+	for i := range pending {
+		pending[i] = i
+	}
+
 	msgs := 0
-
-	readBatches := func(batchIndexes []int, countFn func([]tagDesc) (int, error), reader func([]tagDesc) ([]any, error)) error {
-		for start := 0; start < len(batchIndexes); {
-			remaining := len(batchIndexes) - start
-			batchTags := make([]tagDesc, remaining)
-			for j, idx := range batchIndexes[start:] {
-				batchTags[j] = tags[idx]
-			}
-
-			nNew, err := countFn(batchTags)
-			if err != nil {
-				return err
-			}
-			msgs += 1
-			subResults, err := reader(batchTags[:nNew])
-			if err != nil {
-				return err
-			}
-			for j, val := range subResults {
-				resultValues[batchIndexes[start+j]] = val
-			}
-			start += nNew
+	for len(pending) > 0 {
+		selectedOrig, chosenTags, _, nextPending, err := selectPackedTagBatch(client, pending, tags, nil)
+		if err != nil {
+			return err
 		}
-		return nil
-	}
-
-	atomicIndexes := make([]int, 0, total)
-	structIndexes := make([]int, 0, total)
-	for i, tag := range tags {
-		if readServiceForTag(tag) == CIPService_FragRead {
-			structIndexes = append(structIndexes, i)
-			continue
+		msgs += 1
+		subResults, err := client.readListFragAll(chosenTags)
+		if err != nil {
+			return err
 		}
-		atomicIndexes = append(atomicIndexes, i)
-	}
-
-	if err := readBatches(atomicIndexes, client.countIOIsThatFit, client.readList); err != nil {
-		return err
-	}
-	if err := readBatches(structIndexes, client.countFragIOIsThatFit, client.readListFragAll); err != nil {
-		return err
+		for i, val := range subResults {
+			resultValues[selectedOrig[i]] = val
+		}
+		pending = nextPending
 	}
 
 	for i := range resultValues {
@@ -1251,19 +1344,25 @@ func (client *Client) ReadMapFrag(m map[string]any) error {
 		i++
 	}
 
-	resultValues := make([]any, 0, total)
-	n := 0
-	for n < total {
-		nNew, err := client.countFragIOIsThatFit(tags[n:])
+	resultValues := make([]any, total)
+	pending := make([]int, total)
+	for i := range pending {
+		pending[i] = i
+	}
+
+	for len(pending) > 0 {
+		selectedOrig, chosenTags, _, nextPending, err := selectPackedTagBatch(client, pending, tags, nil)
 		if err != nil {
 			return err
 		}
-		subResults, err := client.readListFragAll(tags[n : n+nNew])
-		n += nNew
+		subResults, err := client.readListFragAll(chosenTags)
 		if err != nil {
 			return err
 		}
-		resultValues = append(resultValues, subResults...)
+		for i, val := range subResults {
+			resultValues[selectedOrig[i]] = val
+		}
+		pending = nextPending
 	}
 
 	for i := range resultValues {
@@ -1286,11 +1385,13 @@ func (client *Client) countFragIOIsThatFit(tags []tagDesc) (int, error) {
 
 	mainHdrSize := binary.Size(ioiHeader)
 	ioiHdrSize := binary.Size(msgCIPMultiIOIHeader{})
-	ioiFtrSize := binary.Size(msgCIPFragIOIFooter{})
+	fragFtrSize := binary.Size(msgCIPFragIOIFooter{})
+	readFtrSize := binary.Size(msgCIPIOIFooter{})
 
 	b := bytes.Buffer{}
 	n := 1
 	responseSize := 0
+	responseHdrSize := binary.Size(msgMultiReadResultHeader{})
 
 	for i, tag := range tags {
 		ioi, err := client.newIOI(tag.TagName, tag.TagType)
@@ -1298,32 +1399,45 @@ func (client *Client) countFragIOIsThatFit(tags []tagDesc) (int, error) {
 			return 0, err
 		}
 
-		newSize := mainHdrSize
-		newSize += 2 * n
-		newSize += b.Len()
-		newSize += ioiHdrSize + len(ioi.Buffer) + ioiFtrSize
+		service := readServiceForTag(tag)
+		footerSize := readFtrSize
+		if service == CIPService_FragRead {
+			footerSize = fragFtrSize
+		}
 
-		responseSize += estimateTagResponseSize(tags[i])
-		if newSize >= int(client.ConnectionSize) || responseSize >= int(client.ConnectionSize) {
+		candidateCount := i + 1
+		newSize := mainHdrSize
+		newSize += 2 * candidateCount
+		newSize += b.Len()
+		newSize += ioiHdrSize + len(ioi.Buffer) + footerSize
+
+		candidateRespSize := responseHdrSize + 2*candidateCount + responseSize + estimateTagResponseSize(tags[i])
+		if newSize >= int(client.ConnectionSize) || candidateRespSize >= int(client.ConnectionSize) {
 			break
 		}
+		responseSize += estimateTagResponseSize(tags[i])
 
 		h := msgCIPMultiIOIHeader{
-			Service: CIPService_FragRead,
+			Service: service,
 			Size:    byte(len(ioi.Buffer) / 2),
 		}
-		f := msgCIPFragIOIFooter{Elements: uint16(tag.Elements), Offset: 0}
 		err = binary.Write(&b, binary.LittleEndian, h)
 		if err != nil {
-			return 0, fmt.Errorf("problem writing fragmented cip IO header to buffer. %w", err)
+			return 0, fmt.Errorf("problem writing mixed cip IO header to buffer. %w", err)
 		}
 		b.Write(ioi.Buffer)
-		err = binary.Write(&b, binary.LittleEndian, f)
+		if service == CIPService_FragRead {
+			f := msgCIPFragIOIFooter{Elements: uint16(tag.Elements), Offset: 0}
+			err = binary.Write(&b, binary.LittleEndian, f)
+		} else {
+			f := msgCIPIOIFooter{Elements: uint16(tag.Elements)}
+			err = binary.Write(&b, binary.LittleEndian, f)
+		}
 		if err != nil {
-			return 0, fmt.Errorf("problem writing fragmented ioi footer to msg buffer. %w", err)
+			return 0, fmt.Errorf("problem writing mixed ioi footer to msg buffer. %w", err)
 		}
 
-		n = i + 1
+		n = candidateCount
 	}
 
 	if n < 1 {
@@ -1356,23 +1470,29 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 	jumpStart := 2 + qty*2
 	for i := 0; i < qty; i++ {
 		jumpTable[i] = uint16(jumpStart + b.Len())
+		service := readServiceForTag(tags[i])
 		h := msgCIPMultiIOIHeader{
-			Service: CIPService_FragRead,
+			Service: service,
 			Size:    byte(len(iois[i].Buffer) / 2),
-		}
-		f := msgCIPFragIOIFooter{
-			Elements: uint16(tags[i].Elements),
-			Offset:   offsets[i],
 		}
 
 		err := binary.Write(&b, binary.LittleEndian, h)
 		if err != nil {
-			return nil, fmt.Errorf("problem writing fragmented cip IO header to buffer. %w", err)
+			return nil, fmt.Errorf("problem writing mixed cip IO header to buffer. %w", err)
 		}
 		b.Write(iois[i].Buffer)
-		err = binary.Write(&b, binary.LittleEndian, f)
+		if service == CIPService_FragRead {
+			f := msgCIPFragIOIFooter{
+				Elements: uint16(tags[i].Elements),
+				Offset:   offsets[i],
+			}
+			err = binary.Write(&b, binary.LittleEndian, f)
+		} else {
+			f := msgCIPIOIFooter{Elements: uint16(tags[i].Elements)}
+			err = binary.Write(&b, binary.LittleEndian, f)
+		}
 		if err != nil {
-			return nil, fmt.Errorf("problem writing fragmented ioi footer to msg buffer. %w", err)
+			return nil, fmt.Errorf("problem writing mixed ioi footer to msg buffer. %w", err)
 		}
 	}
 
@@ -1470,15 +1590,20 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 		}
 
 		if !rHdr.Service.IsResponse() {
-			return nil, fmt.Errorf("fragmented item %d was not a response service. Got %v", i, rHdr.Service)
+			return nil, fmt.Errorf("mixed item %d was not a response service. Got %v", i, rHdr.Service)
 		}
 		rHdr.Service = rHdr.Service.UnResponse()
-		if rHdr.Service != CIPService_FragRead {
-			return nil, fmt.Errorf("fragmented item %d had unexpected service %v", i, rHdr.Service)
+		if rHdr.Service != CIPService_FragRead && rHdr.Service != CIPService_Read {
+			return nil, fmt.Errorf("mixed item %d had unexpected service %v", i, rHdr.Service)
 		}
 
 		status := CIPStatus(rHdr.Status & 0xFF)
-		if status != CIPStatus_OK && status != CIPStatus_PartialTransfer {
+		if rHdr.Service == CIPService_FragRead {
+			if status != CIPStatus_OK && status != CIPStatus_PartialTransfer {
+				results[i] = fragReadTagResult{Status: status, Type: rHdr.Type}
+				continue
+			}
+		} else if status != CIPStatus_OK {
 			results[i] = fragReadTagResult{Status: status, Type: rHdr.Type}
 			continue
 		}
