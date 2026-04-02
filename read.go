@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 )
 
@@ -441,7 +442,7 @@ func (client *Client) Read_single(tag string, datatype CIPType, elements uint16)
 		return nil, fmt.Errorf("problem reading tags. Status %v", CIPStatus(hdr.Status))
 	}
 
-	read_result_header := msgCIPResultHeader{}
+	read_result_header := msgCSDHeader{}
 	err = binary.Read(data, binary.LittleEndian, &read_result_header)
 	if err != nil {
 		client.Logger.Warn("Problem reading read result header", "error", err)
@@ -772,23 +773,12 @@ func selectPackedTagIndexes(client *Client, tags []tagDesc, iois []*tagIOI) ([]i
 		return nil, fmt.Errorf("mismatched tag and IOI counts")
 	}
 
-	qty := len(tags)
-	ioiHeader := msgCIPConnectedMultiServiceReq{
-		Sequence:     uint16(sequencer()),
-		Service:      CIPService_MultipleService,
-		PathSize:     2,
-		Path:         [4]byte{0x20, 0x02, 0x24, 0x01},
-		ServiceCount: uint16(qty),
-	}
-
-	mainHdrSize := binary.Size(ioiHeader)
 	ioiHdrSize := binary.Size(msgCIPMultiIOIHeader{})
 	fragFtrSize := binary.Size(msgCIPFragIOIFooter{})
 	readFtrSize := binary.Size(msgCIPIOIFooter{})
 
 	selected := make([]int, 0, len(tags))
 	packedBytes := 0
-	responseHdrSize := binary.Size(msgMultiReadResultHeader{})
 	responseSize := 0
 
 	for i, tag := range tags {
@@ -810,8 +800,8 @@ func selectPackedTagIndexes(client *Client, tags []tagDesc, iois []*tagIOI) ([]i
 		}
 
 		candidateCount := len(selected) + 1
-		candidateMsgSize := mainHdrSize + 2*candidateCount + packedBytes + ioiHdrSize + len(ioi.Buffer) + footerSize
-		candidateRespSize := responseHdrSize + 2*candidateCount + responseSize + estimateTagResponseSize(tag)
+		candidateMsgSize := estimateMultiReadRequestOverhead(candidateCount) + packedBytes + ioiHdrSize + len(ioi.Buffer) + footerSize
+		candidateRespSize := estimateMultiReadReplyOverhead(candidateCount) + responseSize + estimateTagResponseSize(tag)
 		if candidateMsgSize >= int(client.ConnectionSize) || candidateRespSize >= int(client.ConnectionSize) {
 			continue
 		}
@@ -876,6 +866,32 @@ func selectPackedTagBatch(client *Client, pending []int, tags []tagDesc, iois []
 	}
 
 	return selectedOrig, chosenTags, chosenIOIs, nextPending, nil
+}
+
+func estimateMultiReadRequestOverhead(serviceCount int) int {
+	if serviceCount < 0 {
+		serviceCount = 0
+	}
+
+	return binary.Size(msgCSDHeader{}) + // interface handle + timeout
+		binary.Size(uint16(0)) + // CPF item count
+		binary.Size(cipItemHeader{}) + binary.Size(uint32(0)) + // connection address item
+		binary.Size(cipItemHeader{}) + // connected data item header
+		binary.Size(msgCIPConnectedMultiServiceReq{}) +
+		2*serviceCount // multi-service jump table
+}
+
+func estimateMultiReadReplyOverhead(replyCount int) int {
+	if replyCount < 0 {
+		replyCount = 0
+	}
+
+	return binary.Size(msgCSDHeader{}) + // interface handle + timeout
+		binary.Size(uint16(0)) + // CPF item count
+		binary.Size(cipItemHeader{}) + binary.Size(uint32(0)) + // connection address item
+		binary.Size(cipItemHeader{}) + // connected data item header
+		binary.Size(msgMultiReadResultHeader{}) +
+		2*replyCount // multi-service offset table
 }
 
 func estimateTagResponseSize(tag tagDesc) int {
@@ -1033,7 +1049,7 @@ func (client *Client) readList(tags []tagDesc) ([]any, error) {
 		return nil, fmt.Errorf("problem reading tags. Status %v", CIPStatus(hdr.Status))
 	}
 
-	read_result_header := msgCIPResultHeader{}
+	read_result_header := msgCSDHeader{}
 	err = binary.Read(data, binary.LittleEndian, &read_result_header)
 	if err != nil {
 		client.Logger.Warn("Problem reading read result header", "error", err)
@@ -1373,17 +1389,6 @@ func (client *Client) ReadMapFrag(m map[string]any) error {
 }
 
 func (client *Client) countFragIOIsThatFit(tags []tagDesc) (int, error) {
-	qty := len(tags)
-
-	ioiHeader := msgCIPConnectedMultiServiceReq{
-		Sequence:     uint16(sequencer()),
-		Service:      CIPService_MultipleService,
-		PathSize:     2,
-		Path:         [4]byte{0x20, 0x02, 0x24, 0x01},
-		ServiceCount: uint16(qty),
-	}
-
-	mainHdrSize := binary.Size(ioiHeader)
 	ioiHdrSize := binary.Size(msgCIPMultiIOIHeader{})
 	fragFtrSize := binary.Size(msgCIPFragIOIFooter{})
 	readFtrSize := binary.Size(msgCIPIOIFooter{})
@@ -1391,7 +1396,6 @@ func (client *Client) countFragIOIsThatFit(tags []tagDesc) (int, error) {
 	b := bytes.Buffer{}
 	n := 1
 	responseSize := 0
-	responseHdrSize := binary.Size(msgMultiReadResultHeader{})
 
 	for i, tag := range tags {
 		ioi, err := client.newIOI(tag.TagName, tag.TagType)
@@ -1406,12 +1410,11 @@ func (client *Client) countFragIOIsThatFit(tags []tagDesc) (int, error) {
 		}
 
 		candidateCount := i + 1
-		newSize := mainHdrSize
-		newSize += 2 * candidateCount
+		newSize := estimateMultiReadRequestOverhead(candidateCount)
 		newSize += b.Len()
 		newSize += ioiHdrSize + len(ioi.Buffer) + footerSize
 
-		candidateRespSize := responseHdrSize + 2*candidateCount + responseSize + estimateTagResponseSize(tags[i])
+		candidateRespSize := estimateMultiReadReplyOverhead(candidateCount) + responseSize + estimateTagResponseSize(tags[i])
 		if newSize >= int(client.ConnectionSize) || candidateRespSize >= int(client.ConnectionSize) {
 			break
 		}
@@ -1515,7 +1518,7 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 		return nil, fmt.Errorf("problem reading fragmented tags. Status %v", CIPStatus(hdr.Status))
 	}
 
-	readResultHeader := msgCIPResultHeader{}
+	readResultHeader := msgCSDHeader{}
 	err = binary.Read(data, binary.LittleEndian, &readResultHeader)
 	if err != nil {
 		client.Logger.Warn("Problem reading fragmented read result header", "error", err)
@@ -1579,6 +1582,8 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 
 		entry := rb[start:end]
 		if len(entry) < SizeOf(msgMultiReadResult{}) {
+			fmt.Println(len(entry), SizeOf(msgMultiReadResult{}))
+			fmt.Println(entry)
 			return nil, fmt.Errorf("fragmented response entry %d too short", i)
 		}
 
@@ -1642,6 +1647,9 @@ func decodeStructReadValue(tag tagDesc, myBytes *bytes.Buffer) (any, error) {
 		v := reflect.New(t)
 		_, err := Unpack(myBytes, v.Interface())
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return v.Elem(), nil
+			}
 			return reflect.Value{}, fmt.Errorf("couldn't unpack struct data. %w", err)
 		}
 		return v.Elem(), nil

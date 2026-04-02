@@ -23,23 +23,24 @@ import (
 // You'll need to type assert the returned values to their expected types.
 //
 // Examples:
-//   // Read scalar tags
-//   tagnames := []string{"TestInt", "TestReal", "TestBool"}
-//   types := []any{int16(0), float32(0), false}
-//   elements := []int{1, 1, 1}
-//   values, err := client.ReadList(tagnames, types, elements)
-//   if err != nil {
-//       log.Fatal(err)
-//   }
-//   intVal := values[0].(int16)
-//   realVal := values[1].(float32)
-//   boolVal := values[2].(bool)
 //
-//   // Read partial arrays with different element counts
-//   tagnames := []string{"DintArray[0]", "RealArray[5]", "StringArray[0]"}
-//   types := []any{[]int32{}, []float32{}, []string{}}
-//   elements := []int{10, 5, 3}  // Read 10 DINTs, 5 REALs, 3 STRINGs
-//   values, err := client.ReadList(tagnames, types, elements)
+//	// Read scalar tags
+//	tagnames := []string{"TestInt", "TestReal", "TestBool"}
+//	types := []any{int16(0), float32(0), false}
+//	elements := []int{1, 1, 1}
+//	values, err := client.ReadList(tagnames, types, elements)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	intVal := values[0].(int16)
+//	realVal := values[1].(float32)
+//	boolVal := values[2].(bool)
+//
+//	// Read partial arrays with different element counts
+//	tagnames := []string{"DintArray[0]", "RealArray[5]", "StringArray[0]"}
+//	types := []any{[]int32{}, []float32{}, []string{}}
+//	elements := []int{10, 5, 3}  // Read 10 DINTs, 5 REALs, 3 STRINGs
+//	values, err := client.ReadList(tagnames, types, elements)
 //
 // For strongly-typed reading with structs, use ReadMulti instead.
 // For map-based reading, use ReadMap.
@@ -92,15 +93,6 @@ func (client *Client) countIOIsThatFit(tags []tagDesc) (int, error) {
 	// first generate IOIs for each tag
 	qty := len(tags)
 
-	ioi_header := msgCIPConnectedMultiServiceReq{
-		Sequence:     uint16(sequencer()),
-		Service:      CIPService_MultipleService,
-		PathSize:     2,
-		Path:         [4]byte{0x20, 0x02, 0x24, 0x01},
-		ServiceCount: uint16(qty),
-	}
-
-	mainhdr_size := binary.Size(ioi_header)
 	ioihdr_size := binary.Size(msgCIPMultiIOIHeader{})
 	ioiftr_size := binary.Size(msgCIPIOIFooter{})
 
@@ -112,7 +104,7 @@ func (client *Client) countIOIsThatFit(tags []tagDesc) (int, error) {
 	// how many ioi's fit in the message
 	n := 1
 
-	response_size := 0
+	responseSize := 0
 
 	for i, tag := range tags {
 		ioi, err := client.newIOI(tag.TagName, tag.TagType)
@@ -131,18 +123,17 @@ func (client *Client) countIOIsThatFit(tags []tagDesc) (int, error) {
 		}
 
 		// Calculate the size of the data once we add this ioi to the list.
-		newSize := mainhdr_size                                // length of the multi-read header
-		newSize += 2 * n                                       // add in the jump table
+		candidateCount := i + 1
+		newSize := estimateMultiReadRequestOverhead(candidateCount)
 		newSize += b.Len()                                     // everything we have so far
 		newSize += ioihdr_size + len(ioi.Buffer) + ioiftr_size // the new ioi data
-		//newSize += 4                                           // Fudge for alignment if needed
-
-		response_size += tags[i].TagType.Size() * tags[i].Elements
-		if newSize >= int(client.ConnectionSize) || response_size >= int(client.ConnectionSize) {
+		candidateRespSize := estimateMultiReadReplyOverhead(candidateCount) + responseSize + estimateTagResponseSize(tag)
+		if newSize >= int(client.ConnectionSize) || candidateRespSize >= int(client.ConnectionSize) {
 			// break before adding this ioi to the list since it will push us over.
 			// we'll continue with n iois (n only increments after an IOI is added)
 			break
 		}
+		responseSize += estimateTagResponseSize(tag)
 
 		err = binary.Write(&b, binary.LittleEndian, h)
 		if err != nil {

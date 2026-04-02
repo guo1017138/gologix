@@ -141,7 +141,7 @@ func (client *Client) GetAttrSingle(class CIPClass, instance CIPInstance, attr C
 	}
 	_ = hdr
 
-	read_result_header := msgCIPResultHeader{}
+	read_result_header := msgCSDHeader{}
 	err = binary.Read(data, binary.LittleEndian, &read_result_header)
 	if err != nil {
 		client.Logger.Warn("Problem reading read result header.", "error", err)
@@ -285,7 +285,7 @@ func (client *Client) GetAttrList(class CIPClass, instance CIPInstance, attrs ..
 	}
 	_ = hdr
 
-	read_result_header := msgCIPResultHeader{}
+	read_result_header := msgCSDHeader{}
 	err = binary.Read(data, binary.LittleEndian, &read_result_header)
 	if err != nil {
 		client.Logger.Warn("Problem reading read result header.", "error", err)
@@ -451,7 +451,7 @@ func (client *Client) GenericCIPMessage(service CIPService, path, msg_data []byt
 	}
 	_ = hdr
 
-	read_result_header := msgCIPResultHeader{}
+	read_result_header := msgCSDHeader{}
 	err = binary.Read(data, binary.LittleEndian, &read_result_header)
 	if err != nil {
 		return nil, fmt.Errorf("problpm reading read result header: %w", err)

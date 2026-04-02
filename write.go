@@ -9,37 +9,39 @@ import (
 
 // WriteMulti writes multiple tags efficiently in a single request using a struct with gologix field tags.
 //
-// The value parameter must be a struct where each field has a `gologix:"tagname"` tag 
-// that specifies which PLC tag to write to. Field types must correspond to the correct 
+// The value parameter must be a struct where each field has a `gologix:"tagname"` tag
+// that specifies which PLC tag to write to. Field types must correspond to the correct
 // CIP types as documented in types.go.
 //
 // Example:
-//   type MyWriteTags struct {
-//       IntTag     int16     `gologix:"TestInt"`
-//       RealTag    float32   `gologix:"TestReal"`  
-//       DintTag    int32     `gologix:"TestDint"`
-//       BoolTag    bool      `gologix:"TestBool"`
-//       StringTag  string    `gologix:"TestString"`
-//   }
 //
-//   writeValues := MyWriteTags{
-//       IntTag:    123,
-//       RealTag:   456.78,
-//       DintTag:   999888,
-//       BoolTag:   true,
-//       StringTag: "Hello PLC",
-//   }
-//   
-//   err := client.WriteMulti(writeValues)
+//	type MyWriteTags struct {
+//	    IntTag     int16     `gologix:"TestInt"`
+//	    RealTag    float32   `gologix:"TestReal"`
+//	    DintTag    int32     `gologix:"TestDint"`
+//	    BoolTag    bool      `gologix:"TestBool"`
+//	    StringTag  string    `gologix:"TestString"`
+//	}
+//
+//	writeValues := MyWriteTags{
+//	    IntTag:    123,
+//	    RealTag:   456.78,
+//	    DintTag:   999888,
+//	    BoolTag:   true,
+//	    StringTag: "Hello PLC",
+//	}
+//
+//	err := client.WriteMulti(writeValues)
 //
 // For UDT tags, nest the struct data:
-//   type MyUDT struct {
-//       Field1 int32
-//       Field2 float32  
-//   }
-//   type WriteTags struct {
-//       UDTTag MyUDT `gologix:"MyUDTTag"`
-//   }
+//
+//	type MyUDT struct {
+//	    Field1 int32
+//	    Field2 float32
+//	}
+//	type WriteTags struct {
+//	    UDTTag MyUDT `gologix:"MyUDTTag"`
+//	}
 //
 // For writing using a map instead of a struct, use WriteMap.
 // For writing a single tag, use Write.
@@ -72,27 +74,28 @@ func (client *Client) WriteMulti(value any) error {
 // matches the UDT name in the PLC, and field types match the UDT field types.
 //
 // Examples:
-//   // Write scalar values
-//   err := client.Write("TestInt", int16(123))        // Write to INT tag
-//   err := client.Write("TestDint", int32(456789))    // Write to DINT tag  
-//   err := client.Write("TestReal", float32(123.45))  // Write to REAL tag
-//   err := client.Write("TestBool", true)             // Write to BOOL tag
-//   err := client.Write("TestString", "Hello World")  // Write to STRING tag
 //
-//   // Write arrays
-//   intArray := []int32{1, 2, 3, 4, 5}
-//   err := client.Write("TestDintArr[0]", intArray)   // Write 5 elements starting at index 0
+//	// Write scalar values
+//	err := client.Write("TestInt", int16(123))        // Write to INT tag
+//	err := client.Write("TestDint", int32(456789))    // Write to DINT tag
+//	err := client.Write("TestReal", float32(123.45))  // Write to REAL tag
+//	err := client.Write("TestBool", true)             // Write to BOOL tag
+//	err := client.Write("TestString", "Hello World")  // Write to STRING tag
 //
-//   // Write UDT struct (struct name must match UDT name)
-//   type MyUDT struct {
-//       Field1 int32
-//       Field2 float32
-//   }
-//   udtValue := MyUDT{Field1: 100, Field2: 3.14}
-//   err := client.Write("MyUDTTag", udtValue)
+//	// Write arrays
+//	intArray := []int32{1, 2, 3, 4, 5}
+//	err := client.Write("TestDintArr[0]", intArray)   // Write 5 elements starting at index 0
 //
-//   // Write to nested UDT field
-//   err := client.Write("MyUDTTag.Field1", int32(200))
+//	// Write UDT struct (struct name must match UDT name)
+//	type MyUDT struct {
+//	    Field1 int32
+//	    Field2 float32
+//	}
+//	udtValue := MyUDT{Field1: 100, Field2: 3.14}
+//	err := client.Write("MyUDTTag", udtValue)
+//
+//	// Write to nested UDT field
+//	err := client.Write("MyUDTTag.Field1", int32(200))
 //
 // For writing multiple tags efficiently, use WriteMulti or WriteMap instead.
 //
@@ -187,7 +190,7 @@ func (client *Client) write_udt(tag string, value any) error {
 	if hdr.Status != 0 {
 		return fmt.Errorf("got non-success status %d when writing", hdr.Status)
 	}
-	read_result_header := msgCIPResultHeader{}
+	read_result_header := msgCSDHeader{}
 	err = binary.Read(data, binary.LittleEndian, &read_result_header)
 	if err != nil {
 		client.Logger.Warn("Problem reading read result header", "error", err)
@@ -276,7 +279,7 @@ func (client *Client) write_single(tag string, value any) error {
 	if hdr.Status != 0 {
 		return fmt.Errorf("got non-success status %d when writing", hdr.Status)
 	}
-	read_result_header := msgCIPResultHeader{}
+	read_result_header := msgCSDHeader{}
 	err = binary.Read(data, binary.LittleEndian, &read_result_header)
 	if err != nil {
 		client.Logger.Warn("Problem reading read result header", "error", err)

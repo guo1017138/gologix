@@ -126,34 +126,21 @@ func (client *Client) ReadMapByInstance(m map[CIPInstance]any) error {
 // countInstanceIOIsThatFit calculates how many instance-based tag requests fit within
 // the connection size limit (request bytes + expected response bytes).
 func countInstanceIOIsThatFit(client *Client, tags []tagDesc, iois []*tagIOI) (int, error) {
-	qty := len(tags)
-
-	ioiHeader := msgCIPConnectedMultiServiceReq{
-		Sequence:     uint16(sequencer()),
-		Service:      CIPService_MultipleService,
-		PathSize:     2,
-		Path:         [4]byte{0x20, 0x02, 0x24, 0x01},
-		ServiceCount: uint16(qty),
-	}
-
-	mainHdrSize := binary.Size(ioiHeader)
 	ioiHdrSize := binary.Size(msgCIPMultiIOIHeader{})
 
 	b := bytes.Buffer{}
 	n := 1
 	responseSize := 0
-	responseHdrSize := binary.Size(msgMultiReadResultHeader{})
 
 	for i, tag := range tags {
 		ioi := iois[i]
 
 		candidateCount := i + 1
-		newSize := mainHdrSize
-		newSize += 2 * candidateCount
+		newSize := estimateMultiReadRequestOverhead(candidateCount)
 		newSize += b.Len()
 		newSize += ioiHdrSize + len(ioi.Buffer) + instanceReadFooterSize(tag)
 
-		candidateRespSize := responseHdrSize + 2*candidateCount + responseSize + estimateTagResponseSize(tag)
+		candidateRespSize := estimateMultiReadReplyOverhead(candidateCount) + responseSize + estimateTagResponseSize(tag)
 		if newSize >= int(client.ConnectionSize) || candidateRespSize >= int(client.ConnectionSize) {
 			break
 		}
@@ -233,7 +220,7 @@ func (client *Client) readListWithIOIs(tags []tagDesc, iois []*tagIOI) ([]any, e
 		return nil, fmt.Errorf("problem in instance-based read. Status %v", CIPStatus(hdr.Status))
 	}
 
-	readResultHeader := msgCIPResultHeader{}
+	readResultHeader := msgCSDHeader{}
 	if err := binary.Read(data, binary.LittleEndian, &readResultHeader); err != nil {
 		client.Logger.Warn("Problem reading result header", "error", err)
 	}

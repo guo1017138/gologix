@@ -80,3 +80,47 @@ func TestSelectPackedTagIndexesIncludesResponseHeaderOverhead(t *testing.T) {
 		t.Fatalf("expected fixed response header to limit batch to one tag, got %v want %v", got, want)
 	}
 }
+
+func TestSelectPackedTagIndexesIncludesCommandSpecificDataOverhead(t *testing.T) {
+	client := &Client{ConnectionSize: 42}
+	tags := []tagDesc{
+		{TagName: "TagA", TagType: CIPTypeDINT, Elements: 1},
+		{TagName: "TagB", TagType: CIPTypeDINT, Elements: 1},
+	}
+	iois := []*tagIOI{
+		{Path: "TagA", Type: CIPTypeDINT, Buffer: []byte{0x20, 0x6b, 0x24, 0x01}},
+		{Path: "TagB", Type: CIPTypeDINT, Buffer: []byte{0x20, 0x6b, 0x24, 0x02}},
+	}
+
+	got, err := selectPackedTagIndexes(client, tags, iois)
+	if err != nil {
+		t.Fatalf("selectPackedTagIndexes returned error: %v", err)
+	}
+
+	want := []int{0}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected command-specific response overhead to limit batch to one tag, got %v want %v", got, want)
+	}
+}
+
+func TestSelectPackedTagIndexesIncludesRequestEnvelopeOverhead(t *testing.T) {
+	client := &Client{ConnectionSize: 48}
+	tags := []tagDesc{
+		{TagName: "TagA", TagType: CIPTypeUnknown, Elements: 1},
+		{TagName: "TagB", TagType: CIPTypeUnknown, Elements: 1},
+	}
+	iois := []*tagIOI{
+		{Path: "TagA", Type: CIPTypeUnknown, Buffer: []byte{0x20, 0x6b, 0x24, 0x01}},
+		{Path: "TagB", Type: CIPTypeUnknown, Buffer: []byte{0x20, 0x6b, 0x24, 0x02}},
+	}
+
+	got, err := selectPackedTagIndexes(client, tags, iois)
+	if err != nil {
+		t.Fatalf("selectPackedTagIndexes returned error: %v", err)
+	}
+
+	want := []int{0}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected request envelope overhead to limit batch to one tag, got %v want %v", got, want)
+	}
+}
