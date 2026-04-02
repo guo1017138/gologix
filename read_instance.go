@@ -17,6 +17,27 @@ func instanceIOIPath(instance CIPInstance) []byte {
 	return b.Bytes()
 }
 
+func instanceReadService(tag tagDesc) CIPService {
+	return readServiceForTag(tag)
+}
+
+func instanceReadFooterSize(tag tagDesc) int {
+	if instanceReadService(tag) == CIPService_FragRead {
+		return binary.Size(msgCIPFragIOIFooter{})
+	}
+	return binary.Size(msgCIPIOIFooter{})
+}
+
+func writeInstanceReadFooter(b *bytes.Buffer, tag tagDesc, offset uint32) error {
+	if instanceReadService(tag) == CIPService_FragRead {
+		return binary.Write(b, binary.LittleEndian, msgCIPFragIOIFooter{
+			Elements: uint16(tag.Elements),
+			Offset:   offset,
+		})
+	}
+	return binary.Write(b, binary.LittleEndian, msgCIPIOIFooter{Elements: uint16(tag.Elements)})
+}
+
 // ReadMapByInstance reads multiple tags using CIP Symbol Instance IDs as map keys.
 //
 // This is equivalent to ReadMap but uses instance IDs instead of tag name strings.
@@ -75,19 +96,49 @@ func (client *Client) ReadMapByInstance(m map[CIPInstance]any) error {
 		i++
 	}
 
-	resultValues := make([]any, 0, total)
-	n := 0
-	for n < total {
-		nNew, err := countInstanceIOIsThatFit(client, tags[n:], iois[n:])
-		if err != nil {
-			return err
+	resultValues := make([]any, total)
+
+	readBatches := func(indexes []int, reader func([]tagDesc, []*tagIOI) ([]any, error)) error {
+		for start := 0; start < len(indexes); {
+			remaining := len(indexes) - start
+			batchTags := make([]tagDesc, remaining)
+			batchIOIs := make([]*tagIOI, remaining)
+			for j, idx := range indexes[start:] {
+				batchTags[j] = tags[idx]
+				batchIOIs[j] = iois[idx]
+			}
+
+			nNew, err := countInstanceIOIsThatFit(client, batchTags, batchIOIs)
+			if err != nil {
+				return err
+			}
+			subResults, err := reader(batchTags[:nNew], batchIOIs[:nNew])
+			if err != nil {
+				return err
+			}
+			for j, val := range subResults {
+				resultValues[indexes[start+j]] = val
+			}
+			start += nNew
 		}
-		subResults, err := client.readListWithIOIs(tags[n:n+nNew], iois[n:n+nNew])
-		n += nNew
-		if err != nil {
-			return err
+		return nil
+	}
+
+	atomicIndexes := make([]int, 0, total)
+	structIndexes := make([]int, 0, total)
+	for i, tag := range tags {
+		if instanceReadService(tag) == CIPService_FragRead {
+			structIndexes = append(structIndexes, i)
+			continue
 		}
-		resultValues = append(resultValues, subResults...)
+		atomicIndexes = append(atomicIndexes, i)
+	}
+
+	if err := readBatches(atomicIndexes, client.readListWithIOIs); err != nil {
+		return err
+	}
+	if err := readBatches(structIndexes, client.readListFragWithIOIsAll); err != nil {
+		return err
 	}
 
 	for i := range resultValues {
@@ -111,7 +162,6 @@ func countInstanceIOIsThatFit(client *Client, tags []tagDesc, iois []*tagIOI) (i
 
 	mainHdrSize := binary.Size(ioiHeader)
 	ioiHdrSize := binary.Size(msgCIPMultiIOIHeader{})
-	ioiFtrSize := binary.Size(msgCIPIOIFooter{})
 
 	b := bytes.Buffer{}
 	n := 1
@@ -123,24 +173,23 @@ func countInstanceIOIsThatFit(client *Client, tags []tagDesc, iois []*tagIOI) (i
 		newSize := mainHdrSize
 		newSize += 2 * n
 		newSize += b.Len()
-		newSize += ioiHdrSize + len(ioi.Buffer) + ioiFtrSize
+		newSize += ioiHdrSize + len(ioi.Buffer) + instanceReadFooterSize(tag)
 
-		responseSize += tags[i].TagType.Size() * tags[i].Elements
+		responseSize += estimateTagResponseSize(tag)
 		if newSize >= int(client.ConnectionSize) || responseSize >= int(client.ConnectionSize) {
 			break
 		}
 
 		h := msgCIPMultiIOIHeader{
-			Service: CIPService_Read,
+			Service: instanceReadService(tag),
 			Size:    byte(len(ioi.Buffer) / 2),
 		}
-		f := msgCIPIOIFooter{Elements: uint16(tag.Elements)}
 
 		if err := binary.Write(&b, binary.LittleEndian, h); err != nil {
 			return 0, fmt.Errorf("problem writing cip IO header to buffer: %w", err)
 		}
 		b.Write(ioi.Buffer)
-		if err := binary.Write(&b, binary.LittleEndian, f); err != nil {
+		if err := writeInstanceReadFooter(&b, tag, 0); err != nil {
 			return 0, fmt.Errorf("problem writing ioi footer to buffer: %w", err)
 		}
 
@@ -175,20 +224,18 @@ func (client *Client) readListWithIOIs(tags []tagDesc, iois []*tagIOI) ([]any, e
 	for i := 0; i < qty; i++ {
 		jumpTable[i] = uint16(jumpStart + b.Len())
 		h := msgCIPMultiIOIHeader{
-			Service: CIPService_Read,
+			Service: instanceReadService(tags[i]),
 			Size:    byte(len(iois[i].Buffer) / 2),
 		}
-		f := msgCIPIOIFooter{Elements: uint16(tags[i].Elements)}
 
 		if err := binary.Write(&b, binary.LittleEndian, h); err != nil {
 			return nil, fmt.Errorf("problem writing cip IO header: %w", err)
 		}
 		b.Write(iois[i].Buffer)
-		if err := binary.Write(&b, binary.LittleEndian, f); err != nil {
+		if err := writeInstanceReadFooter(&b, tags[i], 0); err != nil {
 			return nil, fmt.Errorf("problem writing ioi footer: %w", err)
 		}
 	}
-
 	reqItems[1] = CIPItem{Header: cipItemHeader{ID: cipItem_ConnectedData}}
 	if err := reqItems[1].Serialize(ioiHeader, jumpTable, &b); err != nil {
 		return nil, fmt.Errorf("problem serializing item header: %w", err)
@@ -277,6 +324,9 @@ func (client *Client) readListWithIOIs(tags []tagDesc, iois []*tagIOI) ([]any, e
 			return nil, fmt.Errorf("item %d was not a response service: got %v", i, rHdr.Service)
 		}
 		rHdr.Service = rHdr.Service.UnResponse()
+		if rHdr.Service != CIPService_Read && rHdr.Service != CIPService_FragRead {
+			return nil, fmt.Errorf("item %d had unexpected service %v", i, rHdr.Service)
+		}
 
 		cipStatus := CIPStatus(rHdr.Status & 0xFF)
 		if cipStatus != CIPStatus_OK {
@@ -288,6 +338,76 @@ func (client *Client) readListWithIOIs(tags []tagDesc, iois []*tagIOI) ([]any, e
 		val, err := decodeReadTagValue(tags[i], iois[i], rHdr.Type, payload)
 		if err != nil {
 			return nil, fmt.Errorf("problem decoding value for instance %s: %w", tags[i].TagName, err)
+		}
+		resultValues[i] = val
+	}
+
+	return resultValues, nil
+}
+
+func (client *Client) readListFragWithIOIsAll(tags []tagDesc, iois []*tagIOI) ([]any, error) {
+	qty := len(tags)
+	if qty != len(iois) {
+		return nil, fmt.Errorf("mismatched tag and IOI counts for instance-based fragmented read")
+	}
+
+	offsets := make([]uint32, qty)
+	chunks := make([]bytes.Buffer, qty)
+	respTypes := make([]CIPType, qty)
+	pending := make([]int, qty)
+	for i := range pending {
+		pending[i] = i
+	}
+
+	for rounds := 0; len(pending) > 0; rounds++ {
+		if rounds > 1024 {
+			return nil, fmt.Errorf("instance-based fragmented read exceeded max continuation rounds")
+		}
+
+		roundTags := make([]tagDesc, len(pending))
+		roundIOIs := make([]*tagIOI, len(pending))
+		roundOffsets := make([]uint32, len(pending))
+		for i, idx := range pending {
+			roundTags[i] = tags[idx]
+			roundIOIs[i] = iois[idx]
+			roundOffsets[i] = offsets[idx]
+		}
+
+		roundResults, err := client.readListFragRound(roundTags, roundIOIs, roundOffsets)
+		if err != nil {
+			return nil, err
+		}
+
+		nextPending := make([]int, 0, len(pending))
+		for i, rr := range roundResults {
+			idx := pending[i]
+			if rr.Status != CIPStatus_OK && rr.Status != CIPStatus_PartialTransfer {
+				return nil, fmt.Errorf("problem reading tag %s. Status %v", tags[idx].TagName, rr.Status)
+			}
+
+			if respTypes[idx] == 0 {
+				respTypes[idx] = rr.Type
+			}
+
+			if len(rr.Data) > 0 {
+				if _, err := chunks[idx].Write(rr.Data); err != nil {
+					return nil, fmt.Errorf("problem accumulating fragmented payload for %s: %w", tags[idx].TagName, err)
+				}
+				offsets[idx] += uint32(len(rr.Data))
+			}
+
+			if rr.Status == CIPStatus_PartialTransfer {
+				nextPending = append(nextPending, idx)
+			}
+		}
+		pending = nextPending
+	}
+
+	resultValues := make([]any, qty)
+	for i := range tags {
+		val, err := decodeReadTagValue(tags[i], iois[i], respTypes[i], chunks[i].Bytes())
+		if err != nil {
+			return nil, fmt.Errorf("problem decoding fragmented instance read value for %s: %w", tags[i].TagName, err)
 		}
 		resultValues[i] = val
 	}

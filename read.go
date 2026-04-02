@@ -757,6 +757,74 @@ type tagDesc struct {
 	Struct   any
 }
 
+func readServiceForTag(tag tagDesc) CIPService {
+	if tag.TagType == CIPTypeStruct || tag.Elements > 1 {
+		return CIPService_FragRead
+	}
+	return CIPService_Read
+}
+
+func estimateTagResponseSize(tag tagDesc) int {
+	elements := tag.Elements
+	if elements < 1 {
+		elements = 1
+	}
+
+	if tag.TagType != CIPTypeStruct {
+		return tag.TagType.Size() * elements
+	}
+
+	size, err := packedStructSize(tag.Struct)
+	if err != nil || size <= 0 {
+		return tag.TagType.Size() * elements
+	}
+	return size * elements
+}
+
+func packedStructSize(v any) (int, error) {
+	if v == nil {
+		return 0, fmt.Errorf("nil value")
+	}
+
+	rv := reflect.ValueOf(v)
+	for rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			rv = reflect.New(rv.Type().Elem()).Elem()
+			break
+		}
+		rv = rv.Elem()
+	}
+
+	switch rv.Kind() {
+	case reflect.Struct:
+		buf := bytes.Buffer{}
+		n, err := Pack(&buf, rv.Interface())
+		if err != nil {
+			return 0, err
+		}
+		if n > 0 {
+			return n, nil
+		}
+		return buf.Len(), nil
+	case reflect.Array, reflect.Slice:
+		total := 0
+		for i := 0; i < rv.Len(); i++ {
+			elemSize, err := packedStructSize(rv.Index(i).Interface())
+			if err != nil {
+				return 0, err
+			}
+			total += elemSize
+		}
+		return total, nil
+	default:
+		size := binary.Size(rv.Interface())
+		if size < 0 {
+			return 0, fmt.Errorf("unsupported struct payload type %T", v)
+		}
+		return size, nil
+	}
+}
+
 func (client *Client) readList(tags []tagDesc) ([]any, error) {
 
 	// first generate IOIs for each tag
@@ -1099,31 +1167,56 @@ func (client *Client) ReadMap(m map[string]any) error {
 		indexes[i] = k
 		i++
 	}
-	result_values := make([]any, 0, total)
-
-	n := 0
+	resultValues := make([]any, total)
 	msgs := 0
-	n_new := 0
-	for n < total {
-		msgs += 1
-		n_new, err = client.countIOIsThatFit(tags[n:])
-		if err != nil {
-			return err
-		}
-		subResults, err := client.readList(tags[n : n+n_new])
-		n += n_new
-		if err != nil {
-			return err
-		}
-		result_values = append(result_values, subResults...)
 
+	readBatches := func(batchIndexes []int, countFn func([]tagDesc) (int, error), reader func([]tagDesc) ([]any, error)) error {
+		for start := 0; start < len(batchIndexes); {
+			remaining := len(batchIndexes) - start
+			batchTags := make([]tagDesc, remaining)
+			for j, idx := range batchIndexes[start:] {
+				batchTags[j] = tags[idx]
+			}
+
+			nNew, err := countFn(batchTags)
+			if err != nil {
+				return err
+			}
+			msgs += 1
+			subResults, err := reader(batchTags[:nNew])
+			if err != nil {
+				return err
+			}
+			for j, val := range subResults {
+				resultValues[batchIndexes[start+j]] = val
+			}
+			start += nNew
+		}
+		return nil
 	}
 
-	// now unpack the result values back into the given structure
-	for i := range result_values {
-		m[indexes[i]] = result_values[i]
+	atomicIndexes := make([]int, 0, total)
+	structIndexes := make([]int, 0, total)
+	for i, tag := range tags {
+		if readServiceForTag(tag) == CIPService_FragRead {
+			structIndexes = append(structIndexes, i)
+			continue
+		}
+		atomicIndexes = append(atomicIndexes, i)
 	}
 
+	if err := readBatches(atomicIndexes, client.countIOIsThatFit, client.readList); err != nil {
+		return err
+	}
+	if err := readBatches(structIndexes, client.countFragIOIsThatFit, client.readListFragAll); err != nil {
+		return err
+	}
+
+	for i := range resultValues {
+		m[indexes[i]] = resultValues[i]
+	}
+
+	client.Logger.Debug("Multi Read", "messages", msgs, "tags", total)
 	return nil
 }
 
@@ -1210,7 +1303,7 @@ func (client *Client) countFragIOIsThatFit(tags []tagDesc) (int, error) {
 		newSize += b.Len()
 		newSize += ioiHdrSize + len(ioi.Buffer) + ioiFtrSize
 
-		responseSize += tags[i].TagType.Size() * tags[i].Elements
+		responseSize += estimateTagResponseSize(tags[i])
 		if newSize >= int(client.ConnectionSize) || responseSize >= int(client.ConnectionSize) {
 			break
 		}
@@ -1406,6 +1499,60 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 	return results, nil
 }
 
+func decodeStructReadValue(tag tagDesc, myBytes *bytes.Buffer) (any, error) {
+	typehash := cipStructHeader{}
+	if err := binary.Read(myBytes, binary.LittleEndian, &typehash); err != nil {
+		return nil, fmt.Errorf("couldn't unpack struct header. %w", err)
+	}
+	if tag.Struct == nil {
+		return myBytes.Bytes(), nil
+	}
+
+	targetType := reflect.TypeOf(tag.Struct)
+	for targetType.Kind() == reflect.Pointer {
+		targetType = targetType.Elem()
+	}
+
+	unpackOne := func(t reflect.Type) (reflect.Value, error) {
+		v := reflect.New(t)
+		_, err := Unpack(myBytes, v.Interface())
+		if err != nil {
+			return reflect.Value{}, fmt.Errorf("couldn't unpack struct data. %w", err)
+		}
+		return v.Elem(), nil
+	}
+
+	switch targetType.Kind() {
+	case reflect.Slice:
+		result := reflect.MakeSlice(targetType, tag.Elements, tag.Elements)
+		elemType := targetType.Elem()
+		for i := 0; i < tag.Elements; i++ {
+			value, err := unpackOne(elemType)
+			if err != nil {
+				return nil, err
+			}
+			result.Index(i).Set(value)
+		}
+		return result.Interface(), nil
+	case reflect.Array:
+		result := reflect.New(targetType).Elem()
+		for i := 0; i < tag.Elements && i < result.Len(); i++ {
+			value, err := unpackOne(targetType.Elem())
+			if err != nil {
+				return nil, err
+			}
+			result.Index(i).Set(value)
+		}
+		return result.Interface(), nil
+	default:
+		value, err := unpackOne(targetType)
+		if err != nil {
+			return nil, err
+		}
+		return value.Interface(), nil
+	}
+}
+
 func decodeReadTagValue(tag tagDesc, ioi *tagIOI, respType CIPType, payload []byte) (any, error) {
 	myBytes := bytes.NewBuffer(payload)
 
@@ -1433,23 +1580,14 @@ func decodeReadTagValue(tag tagDesc, ioi *tagIOI, respType CIPType, payload []by
 		}
 
 		if respType == CIPTypeStruct {
-			typehash := cipStructHeader{}
-			err := binary.Read(myBytes, binary.LittleEndian, &typehash)
-			if err != nil {
-				return nil, fmt.Errorf("couldn't unpack struct header. %w", err)
-			}
-			if tag.Struct == nil {
-				return myBytes.Bytes(), nil
-			}
-			x := reflect.New(reflect.TypeOf(tag.Struct)).Interface()
-			_, err = Unpack(myBytes, x)
-			if err != nil {
-				return nil, fmt.Errorf("couldn't unpack struct data. %w", err)
-			}
-			return reflect.ValueOf(x).Elem().Interface(), nil
+			return decodeStructReadValue(tag, myBytes)
 		}
 
 		return respType.readValue(myBytes)
+	}
+
+	if respType == CIPTypeStruct {
+		return decodeStructReadValue(tag, myBytes)
 	}
 
 	val := make([]any, tag.Elements)

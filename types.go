@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 )
 
 type CIPType byte
@@ -31,9 +32,9 @@ func GoVarToCIPType(T any) (CIPType, int) {
 		return CIPTypeUINT, 1
 	case int16, *int16:
 		return CIPTypeINT, 1
-	case uint32, *uint32:
+	case uint32, *uint32, uint, *uint:
 		return CIPTypeUDINT, 1
-	case int32, *int32:
+	case int32, *int32, int, *int:
 		return CIPTypeDINT, 1
 	case uint64, *uint64:
 		return CIPTypeLWORD, 1
@@ -55,7 +56,11 @@ func GoVarToCIPType(T any) (CIPType, int) {
 		return CIPTypeINT, len(x)
 	case []uint32:
 		return CIPTypeUDINT, len(x)
+	case []uint:
+		return CIPTypeUDINT, len(x)
 	case []int32:
+		return CIPTypeDINT, len(x)
+	case []int:
 		return CIPTypeDINT, len(x)
 	case []uint64:
 		return CIPTypeLWORD, len(x)
@@ -67,9 +72,42 @@ func GoVarToCIPType(T any) (CIPType, int) {
 		return CIPTypeLREAL, len(x)
 	case []string:
 		return CIPTypeSTRING, len(x)
-	case interface{}:
-		return CIPTypeStruct, 1
 	}
+
+	if T == nil {
+		return CIPTypeUnknown, 1
+	}
+
+	rt := reflect.TypeOf(T)
+	rv := reflect.ValueOf(T)
+	for rt.Kind() == reflect.Pointer {
+		rt = rt.Elem()
+		if !rv.IsValid() {
+			break
+		}
+		if rv.IsNil() {
+			rv = reflect.Zero(rt)
+			break
+		}
+		rv = rv.Elem()
+	}
+
+	switch rt.Kind() {
+	case reflect.Struct:
+		return CIPTypeStruct, 1
+	case reflect.Slice, reflect.Array:
+		elemType := rt.Elem()
+		for elemType.Kind() == reflect.Pointer {
+			elemType = elemType.Elem()
+		}
+		if elemType.Kind() == reflect.Struct {
+			if rv.IsValid() && (rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array) {
+				return CIPTypeStruct, rv.Len()
+			}
+			return CIPTypeStruct, 1
+		}
+	}
+
 	return CIPTypeUnknown, 1
 }
 
@@ -159,7 +197,7 @@ func (c CIPType) Size() int {
 	case CIPTypeDATETIME:
 		return 0 //?
 	case CIPTypeSTRING:
-		return 1
+		return 88
 	default:
 		return 0
 	}
