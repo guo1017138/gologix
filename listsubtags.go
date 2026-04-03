@@ -65,11 +65,10 @@ func (client *Client) ListSubTags(Program *KnownProgram, start_instance uint32) 
 	_ = hdr
 	_ = data
 
-	// first six bytes are zero.
-	padding := make([]byte, 6)
-	_, err = data.Read(padding)
+	csdHeader := msgCSDHeader{}
+	err = binary.Read(data, binary.LittleEndian, &csdHeader)
 	if err != nil {
-		return nil, fmt.Errorf("problem reading padding. %w", err)
+		return nil, fmt.Errorf("problem reading message command specific data header. %v", err)
 	}
 
 	resp_items, err := readItems(data)
