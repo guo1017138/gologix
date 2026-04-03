@@ -64,6 +64,11 @@ type msgListInstanceHeader struct {
 	Status        uint16
 }
 
+// GetInstanceAttributeList (0x55) continuation resumes from the last returned instance.
+func nextListInstanceStart(lastInstance uint32) uint32 {
+	return lastInstance
+}
+
 // ListAllTags discovers and catalogs all tags available in the PLC, starting from the specified instance ID.
 //
 // This function performs a comprehensive scan of the PLC's symbol table to build a complete inventory
@@ -313,8 +318,8 @@ func (client *Client) ListAllTags(start_instance uint32) error {
 
 	}
 
-	if data_hdr.Status == uint16(CIPStatus_PartialTransfer) { //} && start_instance < 200 {
-		err = client.ListAllTags(start_instance)
+	if data_hdr.Status == uint16(CIPStatus_PartialTransfer) {
+		err = client.ListAllTags(nextListInstanceStart(start_instance))
 		if err != nil {
 			return err
 		}

@@ -40,6 +40,9 @@ func (p cipPack) Align(t reflect.Type) int {
 		}
 
 	}
+	if a < 4 && t.Kind() == reflect.Struct {
+		a = 4
+	}
 	return a
 }
 
@@ -262,6 +265,19 @@ func Pack(w io.Writer, data any) (int, error) {
 			}
 		}
 		pos += s
+		if k == reflect.Struct {
+			// make sure we are writing the new data for this field to the properly aligned byte
+			rem := a - (pos % a)
+			if rem < a && rem > 0 {
+				// need paddding bits
+				pad := make([]byte, rem)
+				_, err := w.Write(pad)
+				if err != nil {
+					return pos, fmt.Errorf("problem writing pad to buffer. %v", err)
+				}
+				pos += rem
+			}
+		}
 	}
 	// Last thing we need to do is check whether there are some packed bools that still need flushed out.
 	if bitpos > 0 {
@@ -376,11 +392,11 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 					for ai := 0; ai < l; ai++ {
 						strArray := make([]byte, 88)
 						count, err := r.Read(strArray)
-						if err != nil || count != 88 {
-							return n, fmt.Errorf("problem reading packed string. %w", err)
+						if err != nil || count < 86 {
+							return n, fmt.Errorf("problem reading packed string. count: %d, error: %v", count, err)
 						}
 						strLen := binary.LittleEndian.Uint32(strArray)
-						if strLen > 84 {
+						if strLen > 82 {
 							return n, fmt.Errorf("problem reading packed string. string length unexpected %d", strLen)
 						}
 						arr.Index(ai).SetString(string(strArray[4 : strLen+4]))
@@ -410,11 +426,11 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 			case reflect.String:
 				strArray := make([]byte, 88)
 				count, err := r.Read(strArray)
-				if err != nil || count != 88 {
-					return n, fmt.Errorf("problem reading packed string. %w", err)
+				if err != nil || count < 86 {
+					return n, fmt.Errorf("problem reading packed string. count: %d, error: %v", count, err)
 				}
 				strLen := binary.LittleEndian.Uint32(strArray)
-				if strLen > 84 {
+				if strLen > 82 {
 					return n, fmt.Errorf("problem reading packed string. string length unexpected %d", strLen)
 				}
 				refVal.Field(i).SetString(string(strArray[4 : strLen+4]))
@@ -436,7 +452,7 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 			pad := make([]byte, rem)
 			_, err = r.Read(pad)
 			if err != nil {
-				return
+				return n, fmt.Errorf("problem reading padding bits. %v", err)
 			}
 			n += rem
 		}
@@ -446,19 +462,32 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 			//binary.Read(r, p.Order(), refVal.Field(i).Interface())
 			err = binary.Read(r, p.Order(), refVal.Field(i).Addr().Interface())
 			if err != nil {
-				return
+				return n, fmt.Errorf("problem reading field data. %v", err)
 			}
 		} else {
 			val := refVal.Field(i).Addr().Interface()
 			s, err = Unpack(r, val)
 			if err != nil {
-				return
+				return n, fmt.Errorf("problem unpacking sub-structure. %v", err)
 			}
 		}
 		n += s
+		if k == reflect.Struct {
+			// make sure we are writing the new data for this field to the properly aligned byte
+			rem := a - (n % a)
+			if rem < a && rem > 0 {
+				// need paddding bits
+				pad := make([]byte, rem)
+				_, err = r.Read(pad)
+				if err != nil {
+					return n, fmt.Errorf("problem reading padding bits. %v", err)
+				}
+				n += rem
+			}
+		}
 	}
 	// Last thing we need to do is check whether there are some packed bools that still need flushed out.
-	return
+	return n, nil
 }
 
 func ReadPacked[T any](client *Client, tag string) (T, error) {

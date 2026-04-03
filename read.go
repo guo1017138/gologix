@@ -620,8 +620,7 @@ func read[T GoLogixTypes](client *Client, tag string) (T, error) {
 }
 
 type cipStringHeader struct {
-	Unknown uint16
-	Length  uint32
+	Length uint32
 }
 type cipStructHeader struct {
 	StructTypeCRC uint16
@@ -1215,11 +1214,11 @@ type msgMultiReadResultHeader struct {
 }
 
 type msgMultiReadResult struct {
-	Service   CIPService
-	Reserved  byte
-	Status    uint16
-	Type      CIPType
-	Reserved2 byte
+	Service     CIPService
+	Reserved    byte
+	Status      uint16
+	Type        CIPType
+	TypeInfoLen byte // Additional type metadata bytes following Type; for structs this is typically 0x02 (`A0 02 <uint16-handle>`).
 }
 
 type msgCIPFragIOIFooter struct {
@@ -1582,8 +1581,6 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 
 		entry := rb[start:end]
 		if len(entry) < SizeOf(msgMultiReadResult{}) {
-			fmt.Println(len(entry), SizeOf(msgMultiReadResult{}))
-			fmt.Println(entry)
 			return nil, fmt.Errorf("fragmented response entry %d too short", i)
 		}
 
@@ -1613,6 +1610,13 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 			continue
 		}
 
+		if rHdr.TypeInfoLen != 0 {
+			typeInfo := cipStructHeader{}
+			err = binary.Read(entryBuf, binary.LittleEndian, &typeInfo)
+			if err != nil {
+				return nil, fmt.Errorf("problem reading additional type info header for item %d: %w", i, err)
+			}
+		}
 		payload := make([]byte, entryBuf.Len())
 		_, err = entryBuf.Read(payload)
 		if err != nil {
@@ -1630,10 +1634,6 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 }
 
 func decodeStructReadValue(tag tagDesc, myBytes *bytes.Buffer) (any, error) {
-	typehash := cipStructHeader{}
-	if err := binary.Read(myBytes, binary.LittleEndian, &typehash); err != nil {
-		return nil, fmt.Errorf("couldn't unpack struct header. %w", err)
-	}
 	if tag.Struct == nil {
 		return myBytes.Bytes(), nil
 	}
@@ -1802,7 +1802,8 @@ func (client *Client) readListFragAll(tags []tagDesc) ([]any, error) {
 	for i := range tags {
 		val, err := decodeReadTagValue(tags[i], iois[i], respTypes[i], chunks[i].Bytes())
 		if err != nil {
-			return nil, fmt.Errorf("problem decoding fragmented read value for %s: %w", tags[i].TagName, err)
+			resultValues[i] = fmt.Errorf("problem decoding read value for %s: %w", tags[i].TagName, err)
+			continue
 		}
 		resultValues[i] = val
 	}

@@ -94,6 +94,7 @@ func (client *Client) ListSubTags(Program *KnownProgram, start_instance uint32) 
 		if err != nil {
 			return nil, fmt.Errorf("problem reading tag header. %w", err)
 		}
+		start_instance = tag_hdr.InstanceID
 		newtag_bytes := make([]byte, tag_hdr.NameLength)
 		err = binary.Read(data2, binary.LittleEndian, &newtag_bytes)
 		if err != nil {
@@ -138,15 +139,14 @@ func (client *Client) ListSubTags(Program *KnownProgram, start_instance uint32) 
 		client.KnownTags[strings.ToLower(newtag_name)] = kt
 		new_kts = append(new_kts, kt)
 
-		start_instance = tag_hdr.InstanceID
-
 	}
 
 	if data_hdr.Status == uint16(CIPStatus_PartialTransfer) {
-		_, err = client.ListSubTags(Program, start_instance)
+		moreTags, err := client.ListSubTags(Program, nextListInstanceStart(start_instance))
 		if err != nil {
 			return new_kts, fmt.Errorf("problem listing subtags. %w", err)
 		}
+		new_kts = append(new_kts, moreTags...)
 	}
 
 	return new_kts, nil
