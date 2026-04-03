@@ -17,19 +17,19 @@ func instanceIOIPath(instance CIPInstance) []byte {
 	return b.Bytes()
 }
 
-func instanceReadService(tag tagDesc) CIPService {
-	return readServiceForTag(tag)
+func instanceReadService(tag tagDesc, connectionSize ...uint16) CIPService {
+	return readServiceForTag(tag, connectionSize...)
 }
 
-func instanceReadFooterSize(tag tagDesc) int {
-	if instanceReadService(tag) == CIPService_FragRead {
+func instanceReadFooterSize(tag tagDesc, connectionSize ...uint16) int {
+	if instanceReadService(tag, connectionSize...) == CIPService_FragRead {
 		return binary.Size(msgCIPFragIOIFooter{})
 	}
 	return binary.Size(msgCIPIOIFooter{})
 }
 
-func writeInstanceReadFooter(b *bytes.Buffer, tag tagDesc, offset uint32) error {
-	if instanceReadService(tag) == CIPService_FragRead {
+func writeInstanceReadFooter(b *bytes.Buffer, tag tagDesc, offset uint32, connectionSize ...uint16) error {
+	if instanceReadService(tag, connectionSize...) == CIPService_FragRead {
 		return binary.Write(b, binary.LittleEndian, msgCIPFragIOIFooter{
 			Elements: uint16(tag.Elements),
 			Offset:   offset,
@@ -138,7 +138,7 @@ func countInstanceIOIsThatFit(client *Client, tags []tagDesc, iois []*tagIOI) (i
 		candidateCount := i + 1
 		newSize := estimateMultiReadRequestOverhead(candidateCount)
 		newSize += b.Len()
-		newSize += ioiHdrSize + len(ioi.Buffer) + instanceReadFooterSize(tag)
+		newSize += ioiHdrSize + len(ioi.Buffer) + instanceReadFooterSize(tag, client.ConnectionSize)
 
 		candidateRespSize := estimateMultiReadReplyOverhead(candidateCount) + responseSize + estimateTagResponseSize(tag)
 		if newSize >= int(client.ConnectionSize) || candidateRespSize >= int(client.ConnectionSize) {
@@ -147,7 +147,7 @@ func countInstanceIOIsThatFit(client *Client, tags []tagDesc, iois []*tagIOI) (i
 		responseSize += estimateTagResponseSize(tag)
 
 		h := msgCIPMultiIOIHeader{
-			Service: instanceReadService(tag),
+			Service: instanceReadService(tag, client.ConnectionSize),
 			Size:    byte(len(ioi.Buffer) / 2),
 		}
 
@@ -155,7 +155,7 @@ func countInstanceIOIsThatFit(client *Client, tags []tagDesc, iois []*tagIOI) (i
 			return 0, fmt.Errorf("problem writing cip IO header to buffer: %w", err)
 		}
 		b.Write(ioi.Buffer)
-		if err := writeInstanceReadFooter(&b, tag, 0); err != nil {
+		if err := writeInstanceReadFooter(&b, tag, 0, client.ConnectionSize); err != nil {
 			return 0, fmt.Errorf("problem writing ioi footer to buffer: %w", err)
 		}
 
@@ -190,7 +190,7 @@ func (client *Client) readListWithIOIs(tags []tagDesc, iois []*tagIOI) ([]any, e
 	for i := 0; i < qty; i++ {
 		jumpTable[i] = uint16(jumpStart + b.Len())
 		h := msgCIPMultiIOIHeader{
-			Service: instanceReadService(tags[i]),
+			Service: instanceReadService(tags[i], client.ConnectionSize),
 			Size:    byte(len(iois[i].Buffer) / 2),
 		}
 
@@ -198,7 +198,7 @@ func (client *Client) readListWithIOIs(tags []tagDesc, iois []*tagIOI) ([]any, e
 			return nil, fmt.Errorf("problem writing cip IO header: %w", err)
 		}
 		b.Write(iois[i].Buffer)
-		if err := writeInstanceReadFooter(&b, tags[i], 0); err != nil {
+		if err := writeInstanceReadFooter(&b, tags[i], 0, client.ConnectionSize); err != nil {
 			return nil, fmt.Errorf("problem writing ioi footer: %w", err)
 		}
 	}

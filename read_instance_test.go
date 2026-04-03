@@ -14,6 +14,10 @@ func TestInstanceReadService(t *testing.T) {
 		t.Fatalf("array tags should use fragmented read service 0x52, got %v", got)
 	}
 
+	if got := instanceReadService(tagDesc{TagType: CIPTypeSTRING, Elements: 1}, 96); got != CIPService_FragRead {
+		t.Fatalf("oversized scalar responses should use fragmented read service 0x52, got %v", got)
+	}
+
 	if got := instanceReadService(tagDesc{TagType: CIPTypeDINT, Elements: 1}); got != CIPService_Read {
 		t.Fatalf("scalar atomic tags should keep using read service 0x4c, got %v", got)
 	}

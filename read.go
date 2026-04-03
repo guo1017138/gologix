@@ -757,8 +757,17 @@ type tagDesc struct {
 	Struct   any
 }
 
-func readServiceForTag(tag tagDesc) CIPService {
+func readServiceForTag(tag tagDesc, connectionSize ...uint16) CIPService {
 	if tag.TagType == CIPTypeStruct || tag.Elements > 1 {
+		return CIPService_FragRead
+	}
+
+	connSize := int(connSizeLargeDefault)
+	if len(connectionSize) > 0 && connectionSize[0] > 0 {
+		connSize = int(connectionSize[0])
+	}
+
+	if estimateMultiReadReplyOverhead(1)+estimateTagResponseSize(tag) >= connSize {
 		return CIPService_FragRead
 	}
 	return CIPService_Read
@@ -792,7 +801,7 @@ func selectPackedTagIndexes(client *Client, tags []tagDesc, iois []*tagIOI) ([]i
 			}
 		}
 
-		service := readServiceForTag(tag)
+		service := readServiceForTag(tag, client.ConnectionSize)
 		footerSize := readFtrSize
 		if service == CIPService_FragRead {
 			footerSize = fragFtrSize
@@ -1402,7 +1411,7 @@ func (client *Client) countFragIOIsThatFit(tags []tagDesc) (int, error) {
 			return 0, err
 		}
 
-		service := readServiceForTag(tag)
+		service := readServiceForTag(tag, client.ConnectionSize)
 		footerSize := readFtrSize
 		if service == CIPService_FragRead {
 			footerSize = fragFtrSize
@@ -1472,7 +1481,7 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 	jumpStart := 2 + qty*2
 	for i := 0; i < qty; i++ {
 		jumpTable[i] = uint16(jumpStart + b.Len())
-		service := readServiceForTag(tags[i])
+		service := readServiceForTag(tags[i], client.ConnectionSize)
 		h := msgCIPMultiIOIHeader{
 			Service: service,
 			Size:    byte(len(iois[i].Buffer) / 2),
