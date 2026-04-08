@@ -76,5 +76,5 @@ type msgCIPReadResultData struct {
 	Service         CIPService
 	Status          [3]byte
 	Type            CIPType
-	Unknown         byte
+	TypeInfoLen     byte // Additional type metadata bytes following Type; for structs this is typically 0x02 (`A0 02 <uint16-handle>`).
 }

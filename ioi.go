@@ -102,8 +102,8 @@ func (ioi *tagIOI) Len() int {
 // this is the default buffer size for tag IOI generation.
 const defaultIOIBufferSize = 256
 
-// The IOI is the tag name structure that CIP requires.  It's parsed out into tag length, tag name pairs with additional
-// data on the backside to indicate what index is requested if needed.
+// The IOI is the tag name structure that CIP requires. It's parsed into symbolic or
+// instance-based path segments, whichever is shorter for the requested tag.
 func (client *Client) newIOI(tagpath string, datatype CIPType) (ioi *tagIOI, err error) {
 	client.ioi_cache_lock.Lock()
 	defer client.ioi_cache_lock.Unlock()
@@ -111,116 +111,181 @@ func (client *Client) newIOI(tagpath string, datatype CIPType) (ioi *tagIOI, err
 	if client.ioi_cache == nil {
 		client.ioi_cache = make(map[string]*tagIOI)
 	}
-	ioi = new(tagIOI)
-	// CIP doesn't care about case.  But we'll make it lowercase to match
-	// the encodings shown in 1756-PM020H-EN-P
+
+	// CIP doesn't care about case. But we'll make it lowercase to match the encodings
+	// shown in 1756-PM020H-EN-P.
 	tagpath = strings.ToLower(tagpath)
 
-	// on firmwares greater than 20, we can do some optimizations.
+	cached, exists := client.ioi_cache[tagpath]
 	if client.firmware() > 20 {
-		tag_info, ok := client.KnownTags[tagpath]
+		knownIOI, ok, err := client.newKnownTagIOI(tagpath, datatype)
+		if err != nil {
+			return nil, err
+		}
 		if ok {
-			// we'll assume the user knows what they're doing if they're dumping data into a struct.
-			/*
-				if tag_info.Info.Type != datatype && (datatype != CIPTypeUnknown && datatype != CIPTypeStruct) {
-					err = fmt.Errorf("data type mismatch for IOI. %v was specified, but I have reason to believe that it's really %v", datatype, tag_info.Info.Type)
-					return
+			if !exists {
+				cached, err = client.newSymbolicIOI(tagpath, datatype)
+				if err != nil {
+					return nil, err
 				}
-			*/
-			if tag_info.Info.Type != 0 && datatype != CIPTypeStruct && datatype != CIPTypeUnknown && datatype != CIPTypeSTRING {
-				ioi.Buffer = tag_info.Bytes()
-				return
+			}
+			if len(knownIOI.Buffer) < len(cached.Buffer) {
+				client.ioi_cache[tagpath] = knownIOI
+				return knownIOI, nil
 			}
 		}
 	}
 
-	extant, exists := client.ioi_cache[tagpath]
 	if exists {
-		ioi = extant
-		return
+		return cached, nil
 	}
-	tag_array := strings.Split(tagpath, ".")
 
-	ioi.Path = tagpath
-	ioi.Type = datatype
-	// we'll build this byte structure up as we go.
-	ioi.Buffer = make([]byte, 0, defaultIOIBufferSize)
+	ioi, err = client.newSymbolicIOI(tagpath, datatype)
+	if err != nil {
+		return nil, err
+	}
+	client.ioi_cache[tagpath] = ioi
+	return ioi, nil
+}
 
-	for _, tag_part := range tag_array {
-		if strings.HasSuffix(tag_part, "]") {
-			// part of an array
-			start_index := strings.Index(tag_part, "[")
-			ioi_part, err := marshalIOIPart(tag_part[0:start_index])
+func (client *Client) newSymbolicIOI(tagpath string, datatype CIPType) (*tagIOI, error) {
+	ioi := &tagIOI{
+		Path:   tagpath,
+		Type:   datatype,
+		Buffer: make([]byte, 0, defaultIOIBufferSize),
+	}
+
+	for _, tagPart := range strings.Split(tagpath, ".") {
+		if err := appendIOIPart(ioi, tagPart); err != nil {
+			return nil, err
+		}
+	}
+	return ioi, nil
+}
+
+func appendIOIPart(ioi *tagIOI, tagPart string) error {
+	if tagPart == "" {
+		return nil
+	}
+
+	if strings.HasSuffix(tagPart, "]") {
+		startIndex := strings.Index(tagPart, "[")
+		if startIndex < 0 {
+			startIndex = len(tagPart)
+		}
+		if startIndex > 0 {
+			ioiPart, err := marshalIOIPart(tagPart[:startIndex])
 			if err != nil {
-				return nil, err
+				return err
 			}
-			_, err = ioi.Write(ioi_part)
-			if err != nil {
-				return ioi, fmt.Errorf("problem writing ioi part %w", err)
-
+			if _, err := ioi.Write(ioiPart); err != nil {
+				return fmt.Errorf("problem writing ioi part %w", err)
 			}
+		}
 
-			t, err := parse_tag_name(tag_part)
-			if err != nil {
-				client.Logger.Warn("problem parsing path", "error", err)
-			}
-
-			for _, order_size := range t.Array_Order {
-				if order_size < 256 {
-					// byte, byte
-					index_part := []byte{byte(cipElement_8bit), byte(order_size)}
-					err = binary.Write(ioi, binary.LittleEndian, index_part)
-					if err != nil {
-						return nil, fmt.Errorf("problem reading index part. %w", err)
-					}
-				} else if order_size < 65536 {
-					// uint16, uint16
-					index_part := []uint16{uint16(cipElement_16bit), uint16(order_size)}
-					err = binary.Write(ioi, binary.LittleEndian, index_part)
-					if err != nil {
-						return nil, fmt.Errorf("problem reading index part. %w", err)
-					}
-				} else {
-					// uint16, uint32
-					index_part0 := []uint16{uint16(cipElement_32bit)}
-					err = binary.Write(ioi, binary.LittleEndian, index_part0)
-					if err != nil {
-						return nil, err
-					}
-					index_part1 := []uint32{uint32(order_size)}
-					err = binary.Write(ioi, binary.LittleEndian, index_part1)
-					if err != nil {
-						return nil, err
-					}
+		t, err := parse_tag_name(tagPart)
+		if err != nil {
+			return fmt.Errorf("problem parsing path %q: %w", tagPart, err)
+		}
+		for _, orderSize := range t.Array_Order {
+			if orderSize < 256 {
+				indexPart := []byte{byte(cipElement_8bit), byte(orderSize)}
+				if err := binary.Write(ioi, binary.LittleEndian, indexPart); err != nil {
+					return fmt.Errorf("problem reading index part. %w", err)
+				}
+			} else if orderSize < 65536 {
+				indexPart := []uint16{uint16(cipElement_16bit), uint16(orderSize)}
+				if err := binary.Write(ioi, binary.LittleEndian, indexPart); err != nil {
+					return fmt.Errorf("problem reading index part. %w", err)
+				}
+			} else {
+				if err := binary.Write(ioi, binary.LittleEndian, []uint16{uint16(cipElement_32bit)}); err != nil {
+					return err
+				}
+				if err := binary.Write(ioi, binary.LittleEndian, []uint32{uint32(orderSize)}); err != nil {
+					return err
 				}
 			}
+		}
+		return nil
+	}
 
-		} else {
-			// not part of an array
-			bit_access, err := strconv.Atoi(tag_part)
-			if err == nil && bit_access <= 31 {
-				// This is a bit access.
-				// we won't do anything for now and will just parse the
-				// bit out of the word when that time comes.
-				ioi.BitAccess = true
-				ioi.BitPosition = bit_access
+	bitAccess, err := strconv.Atoi(tagPart)
+	if err == nil && bitAccess <= 31 {
+		ioi.BitAccess = true
+		ioi.BitPosition = bitAccess
+		return nil
+	}
+
+	ioiPart, err := marshalIOIPart(tagPart)
+	if err != nil {
+		return err
+	}
+	_, err = ioi.Write(ioiPart)
+	return err
+}
+
+func (client *Client) newKnownTagIOI(tagpath string, datatype CIPType) (*tagIOI, bool, error) {
+	if client.KnownTags == nil {
+		return nil, false, nil
+	}
+
+	knownTag, remainder, ok, err := client.findKnownTagPrefix(tagpath)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+
+	if knownTag.Info.Type == CIPTypeStruct && len(knownTag.Array_Order) > 0 {
+		return nil, false, nil
+	}
+
+	prefix := knownTag.Bytes()
+	ioi := &tagIOI{
+		Path:   tagpath,
+		Type:   datatype,
+		Buffer: make([]byte, 0, len(prefix)+defaultIOIBufferSize),
+	}
+	ioi.Buffer = append(ioi.Buffer, prefix...)
+
+	remainder = strings.TrimPrefix(remainder, ".")
+	if remainder == "" {
+		return ioi, true, nil
+	}
+	for _, tagPart := range strings.Split(remainder, ".") {
+		if err := appendIOIPart(ioi, tagPart); err != nil {
+			return nil, false, err
+		}
+	}
+	return ioi, true, nil
+}
+
+func (client *Client) findKnownTagPrefix(tagpath string) (KnownTag, string, bool, error) {
+	rawParts := strings.Split(tagpath, ".")
+	for end := len(rawParts); end > 0; end-- {
+		candidateParts := make([]string, 0, end)
+		for _, part := range rawParts[:end] {
+			bitAccess, err := strconv.Atoi(part)
+			if err == nil && bitAccess <= 31 {
 				continue
 			}
-			ioi_part, err := marshalIOIPart(tag_part)
+			parsed, err := parse_tag_name(part)
 			if err != nil {
-				return nil, err
+				return KnownTag{}, "", false, err
 			}
-			_, err = ioi.Write(ioi_part)
-			if err != nil {
-				return nil, err
+			if parsed.BasePath != "" {
+				candidateParts = append(candidateParts, parsed.BasePath)
 			}
-
 		}
-
+		if len(candidateParts) == 0 {
+			continue
+		}
+		candidate := strings.Join(candidateParts, ".")
+		if knownTag, ok := client.KnownTags[candidate]; ok {
+			remainder := strings.TrimPrefix(tagpath, candidate)
+			return knownTag, remainder, true, nil
+		}
 	}
-
-	client.ioi_cache[tagpath] = ioi
-	return
+	return KnownTag{}, "", false, nil
 }
 
 func marshalIOIPart(tagpath string) ([]byte, error) {

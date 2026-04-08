@@ -146,3 +146,46 @@ func TestIOIToBytesAndBackAgain(t *testing.T) {
 	}
 
 }
+
+func TestIOIPrefersShortestKnownInstancePrefix(t *testing.T) {
+	client := Client{
+		KnownTags: map[string]KnownTag{
+			"basetag": {Name: "basetag", Instance: 7},
+		},
+		ioi_cache:     make(map[string]*tagIOI),
+		knownFirmware: 32,
+	}
+
+	res, err := client.newIOI("BaseTag.Member", CIPTypeDINT)
+	if err != nil {
+		t.Fatalf("IOI Generation error. %v", err)
+	}
+
+	want := append(KnownTag{Name: "basetag", Instance: 7}.Bytes(), []byte{0x91, 0x06, 'm', 'e', 'm', 'b', 'e', 'r'}...)
+	if !check_bytes(res.Buffer, want) {
+		t.Fatalf("expected shortest instance-prefixed path.\nWanted %v\nGot    %v", to_hex(want), to_hex(res.Buffer))
+	}
+}
+
+func TestIOIKeepsSymbolicPathForStructArray(t *testing.T) {
+	client := Client{
+		KnownTags: map[string]KnownTag{
+			"udtarray": {
+				Name:        "udtarray",
+				Instance:    9,
+				Info:        TagInfo{Type: CIPTypeStruct},
+				Array_Order: []int{8},
+			},
+		},
+		ioi_cache:     make(map[string]*tagIOI),
+		knownFirmware: 32,
+	}
+
+	res, err := client.newIOI("UdtArray[1]", CIPTypeStruct)
+	if err != nil {
+		t.Fatalf("IOI Generation error. %v", err)
+	}
+	if len(res.Buffer) == 0 || res.Buffer[0] != byte(segmentTypeExtendedSymbolic) {
+		t.Fatalf("expected struct array reads to stay symbolic, got %v", to_hex(res.Buffer))
+	}
+}

@@ -463,6 +463,13 @@ func (client *Client) Read_single(tag string, datatype CIPType, elements uint16)
 	if hdr2.Status[1] != uint8(CIPStatus_OK) {
 		return nil, fmt.Errorf("service returned status %v", CIPStatus(hdr2.Status[1]))
 	}
+	if hdr2.TypeInfoLen != 0 {
+		typeInfo := cipStructHeader{}
+		err = items[1].DeSerialize(&typeInfo)
+		if err != nil {
+			return nil, fmt.Errorf("problem reading additional type info header for item %d: %v", 2, err)
+		}
+	}
 
 	if hdr2.Type == CIPTypeStruct {
 		if datatype == CIPTypeSTRING {
@@ -495,11 +502,6 @@ func (client *Client) Read_single(tag string, datatype CIPType, elements uint16)
 				response[i] = str[:str_hdr.Length]
 			}
 			return response, nil
-		}
-		str_hdr := cipStructHeader{}
-		err = items[1].DeSerialize(&str_hdr)
-		if err != nil {
-			return nil, fmt.Errorf("couldn't unpack struct header. %w", err)
 		}
 		str := items[1].Data[items[1].Pos:]
 		return str, nil
