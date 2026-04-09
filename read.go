@@ -400,139 +400,176 @@ func (client *Client) Read(tag string, data any) error {
 //
 // For strongly-typed reading, use the Read function instead. For multiple tags, use ReadMulti or ReadMap.
 func (client *Client) Read_single(tag string, datatype CIPType, elements uint16) (any, error) {
-
-	err := client.checkConnection()
-	if err != nil {
+	if err := client.checkConnection(); err != nil {
 		return nil, fmt.Errorf("could not start single read: %w", err)
 	}
 
 	ioi, err := client.newIOI(tag, datatype)
-
 	if err != nil {
 		return nil, err
 	}
 
-	reqItems := make([]CIPItem, 2)
-	reqItems[0] = newItem(cipItem_ConnectionAddress, &client.OTNetworkConnectionID)
+	service := client.singleReadService(tag, datatype, elements)
+	offset := uint32(0)
+	payload := bytes.Buffer{}
+	respType := datatype
 
-	readMsg := msgCIPConnectedServiceReq{
-		SequenceCount: uint16(sequencer()),
-		Service:       CIPService_Read,
-		PathLength:    byte(len(ioi.Bytes()) / 2),
-	}
-	// setup item
-	reqItems[1] = newItem(cipItem_ConnectedData, readMsg)
-	// add path
-	err = reqItems[1].Serialize(ioi, elements)
-	if err != nil {
-		return nil, fmt.Errorf("problem serializing ioi: %w", err)
-	}
-
-	itemData, err := serializeItems(reqItems)
-	if err != nil {
-		return nil, err
-	}
-	hdr, data, err := client.send_recv_data(cipCommandSendUnitData, itemData)
-	if err != nil {
-		return nil, err
-	}
-	_ = hdr
-
-	if hdr.Status != 0 {
-		return nil, fmt.Errorf("problem reading tags. Status %v", CIPStatus(hdr.Status))
-	}
-
-	read_result_header := msgCSDHeader{}
-	err = binary.Read(data, binary.LittleEndian, &read_result_header)
-	if err != nil {
-		client.Logger.Warn("Problem reading read result header", "error", err)
-	}
-	items, err := readItems(data)
-	if err != nil {
-		client.Logger.Warn("Problem reading items", "error", err)
-		return 0, err
-	}
-	if len(items) != 2 {
-		return 0, fmt.Errorf("wrong Number of Items. Expected 2 but got %v", len(items))
-	}
-	var hdr2 msgCIPReadResultData
-	err = items[1].DeSerialize(&hdr2)
-	if err != nil {
-		return 0, fmt.Errorf("problem reading item 2's header. %w", err)
-	}
-	if hdr2.Status[1] != uint8(CIPStatus_OK) {
-		return nil, fmt.Errorf("service returned status %v", CIPStatus(hdr2.Status[1]))
-	}
-	if hdr2.TypeInfoLen != 0 {
-		typeInfo := cipStructHeader{}
-		err = items[1].DeSerialize(&typeInfo)
-		if err != nil {
-			return nil, fmt.Errorf("problem reading additional type info header for item %d: %v", 2, err)
+	for rounds := 0; ; rounds++ {
+		if rounds > 1024 {
+			return nil, fmt.Errorf("single read exceeded max continuation rounds for %s", tag)
 		}
-	}
 
-	if hdr2.Type == CIPTypeStruct {
+		reqItems := make([]CIPItem, 2)
+		reqItems[0] = newItem(cipItem_ConnectionAddress, &client.OTNetworkConnectionID)
+
+		readMsg := msgCIPConnectedServiceReq{
+			SequenceCount: uint16(sequencer()),
+			Service:       service,
+			PathLength:    byte(len(ioi.Bytes()) / 2),
+		}
+		reqItems[1] = newItem(cipItem_ConnectedData, readMsg)
+		if service == CIPService_FragRead {
+			err = reqItems[1].Serialize(ioi, msgCIPFragIOIFooter{Elements: elements, Offset: offset})
+		} else {
+			err = reqItems[1].Serialize(ioi, elements)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("problem serializing ioi: %w", err)
+		}
+
+		itemData, err := serializeItems(reqItems)
+		if err != nil {
+			return nil, err
+		}
+		hdr, data, err := client.send_recv_data(cipCommandSendUnitData, itemData)
+		if err != nil {
+			return nil, err
+		}
+		if hdr.Status != 0 {
+			return nil, fmt.Errorf("problem reading tags. Status %v", CIPStatus(hdr.Status))
+		}
+
+		readResultHeader := msgCSDHeader{}
+		err = binary.Read(data, binary.LittleEndian, &readResultHeader)
+		if err != nil {
+			client.Logger.Warn("Problem reading read result header", "error", err)
+		}
+		items, err := readItems(data)
+		if err != nil {
+			client.Logger.Warn("Problem reading items", "error", err)
+			return 0, err
+		}
+		if len(items) != 2 {
+			return 0, fmt.Errorf("wrong Number of Items. Expected 2 but got %v", len(items))
+		}
+
+		var hdr2 msgCIPReadResultData
+		err = items[1].DeSerialize(&hdr2)
+		if err != nil {
+			return 0, fmt.Errorf("problem reading item 2's header. %w", err)
+		}
+
+		status := CIPStatus(hdr2.Status[1])
+		if status != CIPStatus_OK && status != CIPStatus_PartialTransfer {
+			return nil, fmt.Errorf("service returned status %v", status)
+		}
+		if hdr2.Type != CIPTypeUnknown || respType == CIPTypeUnknown {
+			respType = hdr2.Type
+		}
+		if hdr2.TypeInfoLen != 0 {
+			typeInfo := cipStructHeader{}
+			err = items[1].DeSerialize(&typeInfo)
+			if err != nil {
+				return nil, fmt.Errorf("problem reading additional type info header for item %d: %v", 2, err)
+			}
+		}
+
+		chunk := items[1].Data[items[1].Pos:]
+		if len(chunk) > 0 {
+			_, err = payload.Write(chunk)
+			if err != nil {
+				return nil, fmt.Errorf("problem accumulating read payload for %s: %w", tag, err)
+			}
+			offset += uint32(len(chunk))
+		}
+
+		if status != CIPStatus_PartialTransfer {
+			return decodeSingleReadPayload(tag, datatype, elements, ioi, respType, payload.Bytes())
+		}
+
+		service = CIPService_FragRead
+	}
+}
+
+func decodeSingleReadPayload(tag string, datatype CIPType, elements uint16, ioi *tagIOI, respType CIPType, payload []byte) (any, error) {
+	myBytes := bytes.NewBuffer(payload)
+
+	if respType == CIPTypeStruct {
 		if datatype == CIPTypeSTRING {
 			if elements == 1 {
-				str_hdr := cipStringHeader{}
-				err = items[1].DeSerialize(&str_hdr)
+				strHdr := cipStringHeader{}
+				err := binary.Read(myBytes, binary.LittleEndian, &strHdr)
 				if err != nil {
 					return nil, fmt.Errorf("couldn't unpack struct header. %w", err)
 				}
-				str := make([]byte, str_hdr.Length)
-				err = items[1].DeSerialize(&str)
+				str := make([]byte, strHdr.Length)
+				err = binary.Read(myBytes, binary.LittleEndian, str)
 				if err != nil {
 					return nil, fmt.Errorf("couldn't unpack struct data. %w", err)
 				}
 				return str, nil
 			}
 			response := make([]any, elements)
-
 			for i := 0; i < int(elements); i++ {
-				str_hdr := cipStringHeader{}
-				err = items[1].DeSerialize(&str_hdr)
+				strHdr := cipStringHeader{}
+				err := binary.Read(myBytes, binary.LittleEndian, &strHdr)
 				if err != nil {
 					return nil, fmt.Errorf("couldn't unpack struct header. %w", err)
 				}
 				str := make([]byte, 82)
-				err = items[1].DeSerialize(&str)
+				err = binary.Read(myBytes, binary.LittleEndian, str)
 				if err != nil {
 					return nil, fmt.Errorf("couldn't unpack struct data. %w", err)
 				}
-				response[i] = str[:str_hdr.Length]
+				response[i] = str[:strHdr.Length]
 			}
 			return response, nil
 		}
-		str := items[1].Data[items[1].Pos:]
-		return str, nil
+		return myBytes.Bytes(), nil
 	}
+
 	if elements == 1 {
-		if datatype == CIPTypeBOOL && hdr2.Type != CIPTypeBOOL && ioi.BitAccess {
-			// we have requested a bool from some other type.  Maybe a bit access?
-			value, err := readValue(hdr2.Type, &items[1])
+		if datatype == CIPTypeBOOL && respType != CIPTypeBOOL && ioi.BitAccess {
+			value, err := readValue(respType, myBytes)
 			if err != nil {
 				return nil, fmt.Errorf("problem reading bool tag %s: %w", tag, err)
 			}
-			return getBit(hdr2.Type, value, ioi.BitPosition)
+			return getBit(respType, value, ioi.BitPosition)
 		}
-		// not a struct so we can read the value directly
-		value, err := readValue(hdr2.Type, &items[1])
+		value, err := readValue(respType, myBytes)
 		if err != nil {
 			return nil, fmt.Errorf("problem reading tag %s: %w", tag, err)
 		}
 		return value, nil
-	} else {
-		value := make([]any, elements)
-		for i := 0; i < int(elements); i++ {
-			value[i], err = readValue(hdr2.Type, &items[1])
-			if err != nil {
-				return nil, fmt.Errorf("problem reading element %d of %s: %w", i, tag, err)
-			}
-
-		}
-		return value, nil
-
 	}
+
+	value := make([]any, elements)
+	for i := 0; i < int(elements); i++ {
+		v, err := readValue(respType, myBytes)
+		if err != nil {
+			return nil, fmt.Errorf("problem reading element %d of %s: %w", i, tag, err)
+		}
+		value[i] = v
+	}
+	return value, nil
+}
+
+func (client *Client) singleReadService(tag string, datatype CIPType, elements uint16) CIPService {
+	return readServiceForTag(tagDesc{
+		TagName:  tag,
+		TagType:  datatype,
+		Elements: int(elements),
+	}, client.ConnectionSize)
 }
 
 func readArray[T GoLogixTypes](client *Client, tag string, elements uint16) ([]T, error) {
@@ -1647,6 +1684,13 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 func decodeStructReadValue(tag tagDesc, myBytes *bytes.Buffer) (any, error) {
 	if tag.Struct == nil {
 		return myBytes.Bytes(), nil
+	}
+
+	if expectedSize, err := packedStructSize(tag.Struct); err == nil {
+		typeInfoLen := binary.Size(cipStructHeader{})
+		if expectedSize > 0 && myBytes.Len() == expectedSize+typeInfoLen {
+			_, _ = myBytes.Read(make([]byte, typeInfoLen))
+		}
 	}
 
 	targetType := reflect.TypeOf(tag.Struct)

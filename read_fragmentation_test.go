@@ -118,3 +118,13 @@ func TestDecodeReadTagValueStructSlice(t *testing.T) {
 		t.Fatalf("decoded struct slice mismatch: got %+v want %+v", got, want)
 	}
 }
+
+func TestSingleReadServiceUsesFragReadWhenReplyTooLarge(t *testing.T) {
+	client := &Client{ConnectionSize: 96}
+	if got := client.singleReadService("LargeString", CIPTypeSTRING, 1); got != CIPService_FragRead {
+		t.Fatalf("expected oversized single-tag read to use 0x52, got %v", got)
+	}
+	if got := client.singleReadService("AtomicDint", CIPTypeDINT, 1); got != CIPService_Read {
+		t.Fatalf("expected small single-tag read to keep using 0x4c, got %v", got)
+	}
+}
