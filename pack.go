@@ -25,11 +25,19 @@ func (p cipPack) Align(t reflect.Type) int {
 	// If a type is a struct we need to check the alignment of every field.
 	// If any of the fields have an alignment of 8 (LINT, LREAL, etc...)
 	// then the struct also has an alignment of 8.
+	if t.Kind() == reflect.String {
+		return 4 // strings are a uint32 length followed by 84 bytes of data, so they have an alignment of 4
+	}
+
+	if t.Kind() == reflect.Array || t.Kind() == reflect.Slice {
+		if t.Elem().Kind() == reflect.String {
+			return 4
+		}
+		return p.Align(t.Elem())
+	}
+
 	if t.Kind() != reflect.Struct {
 		return t.Align()
-	}
-	if t.Kind() == reflect.Array {
-		return p.Align(t.Elem())
 	}
 
 	a := 1
@@ -121,12 +129,26 @@ func Pack(w io.Writer, data any) (int, error) {
 	// start reflecting and loop through the fields of the struct
 	refType := reflect.TypeOf(data)
 	refVal := reflect.ValueOf(data)
+	lastA := 1
 	for i := 0; i < refType.NumField(); i++ {
 		field := refType.Field(i)
 		a := p.Align(field.Type)
 		t := field.Tag.Get("pack")
 		s := int(field.Type.Size())
 		k := refVal.Field(i).Kind()
+		if a > lastA {
+			// if the alignment of this field is bigger than the last one, we need to check whether we need to add padding to align to the new field's alignment
+			rem := a - (pos % a)
+			if rem != a {
+				padding := make([]byte, rem)
+				_, err := w.Write(padding)
+				if err != nil {
+					return pos, fmt.Errorf("problem writing padding bytes: %w", err)
+				}
+				pos += rem
+			}
+		}
+		lastA = a
 
 		// if there isn't a nopack tag on the field, we need to check for bools that need combined into bytes
 		if t != "nopack" {
@@ -340,12 +362,27 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 		// continue on
 
 	}
+	lastA := 1
 	for i := 0; i < refType.NumField(); i++ {
 		field := refType.Field(i)
 		a := p.Align(field.Type)
 		t := field.Tag.Get("pack")
 		s := int(field.Type.Size())
 		k := refVal.Field(i).Kind()
+		if a > lastA {
+			// make sure we are writing the new data for this field to the properly aligned byte
+			rem := a - (n % a)
+			if rem < a && rem > 0 {
+				// need paddding bits
+				pad := make([]byte, rem)
+				_, err = r.Read(pad)
+				if err != nil {
+					return n, fmt.Errorf("problem reading padding bits. %v", err)
+				}
+				n += rem
+			}
+		}
+		lastA = a
 
 		// if there isn't a nopack tag on the field, we need to check for bools that need combined into bytes
 		if t != "nopack" {
@@ -400,6 +437,7 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 							return n, fmt.Errorf("problem reading packed string. string length unexpected %d", strLen)
 						}
 						arr.Index(ai).SetString(string(strArray[4 : strLen+4]))
+						n += 88
 					}
 					continue
 				}
@@ -434,6 +472,7 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 					return n, fmt.Errorf("problem reading packed string. string length unexpected %d", strLen)
 				}
 				refVal.Field(i).SetString(string(strArray[4 : strLen+4]))
+				n += 88
 				continue
 			}
 
