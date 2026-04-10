@@ -132,9 +132,34 @@ func (client *Client) ListSubTags(Program *KnownProgram, start_instance uint32) 
 		} else {
 			kt.Array_Order = make([]int, 0)
 		}
-		if !isValidTag(string(newtag_bytes), *tag_ftr) {
+		tag_string := string(newtag_bytes)
+		if !isValidTag(tag_string, *tag_ftr) {
 			continue
 		}
+
+		if tag_ftr.Template_ID() != 0 {
+			client.Logger.Debug("found UDT of some sort", "name", kt.Name)
+		}
+
+		if tag_ftr.Template_ID() != 0 { //&& !tag_ftr.PreDefined() {
+			client.Logger.Debug("Looking up template", "tag name", tag_string)
+			u, err := client.ListMembers(uint32(tag_ftr.Template_ID()))
+			if err != nil {
+				client.Logger.Error("problem reading member list",
+					"string", tag_string,
+					"header", tag_hdr,
+					"footer", tag_ftr,
+					"template ID", tag_ftr.Template_ID(),
+					"predefined", tag_ftr.PreDefined(),
+					"error", err)
+				//return err
+			} else {
+				kt.UDT = &u
+				client.Logger.Debug("Successful member read for %s", "name", kt.Name)
+				client.KnownTypes[u.Name] = u
+			}
+		}
+
 		client.KnownTags[strings.ToLower(newtag_name)] = kt
 		new_kts = append(new_kts, kt)
 
