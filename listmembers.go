@@ -300,11 +300,11 @@ func (client *Client) ListMembers(str_instance uint32) (UDTDescriptor, error) {
 	}
 
 	totalBytes := template_info.SizeWords * 4
-	if totalBytes < 23 {
+	if totalBytes < 20 { // 20 is TCP header + CIP header size
 		return UDTDescriptor{}, fmt.Errorf("template size too small for member read. instance %d sizeWords=%d", str_instance, template_info.SizeWords)
 	}
 
-	payload, err := collectMemberReadPayload(totalBytes-23, func(startOffset uint32, readLength uint16) (msgMemberInfoHdr, []byte, error) {
+	payload, err := collectMemberReadPayload(totalBytes-20, func(startOffset uint32, readLength uint16) (msgMemberInfoHdr, []byte, error) {
 		return client.requestMemberReadChunk(str_instance, startOffset, readLength)
 	})
 	if err != nil {
