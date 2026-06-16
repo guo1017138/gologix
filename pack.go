@@ -150,6 +150,26 @@ func Pack(w io.Writer, data any) (int, error) {
 		}
 		lastA = a
 
+		// if struct field has a byteIndex tag, use byteIndex to determine how many padding bits we need to write before writing the field data
+		byteIndexTag := field.Tag.Get("byteIndex")
+		if byteIndexTag != "" {
+			var byteIndex int
+			_, err := fmt.Sscanf(byteIndexTag, "%d", &byteIndex)
+			if err != nil {
+				return pos, fmt.Errorf("problem parsing byteIndex tag: %w", err)
+			}
+			// read bits until we reach the specified byte index
+			if pos < byteIndex {
+				remain := byteIndex - pos
+				padding := make([]byte, remain)
+				_, err := w.Write(padding)
+				if err != nil {
+					return pos, fmt.Errorf("problem writing byteIndex padding: %w", err)
+				}
+				pos += remain
+			}
+		}
+
 		// if there isn't a nopack tag on the field, we need to check for bools that need combined into bytes
 		if t != "nopack" {
 			// there are two conditions where we pack bits.  Multiple bools in series or a bool array.
@@ -383,6 +403,26 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 			}
 		}
 		lastA = a
+
+		// if struct field has a byteIndex tag, we need to read bits until we get to that byte index before we can read the field data
+		byteIndexTag := field.Tag.Get("byteIndex")
+		if byteIndexTag != "" {
+			var byteIndex int
+			_, err := fmt.Sscanf(byteIndexTag, "%d", &byteIndex)
+			if err != nil {
+				return n, fmt.Errorf("problem parsing byteIndex tag: %w", err)
+			}
+			// read bits until we reach the specified byte index
+			if n < byteIndex {
+				remain := byteIndex - n
+				br := make([]byte, remain)
+				_, err = r.Read(br)
+				if err != nil {
+					return n, fmt.Errorf("problem reading byteIndex padding: %w", err)
+				}
+				n += remain
+			}
+		}
 
 		// if there isn't a nopack tag on the field, we need to check for bools that need combined into bytes
 		if t != "nopack" {

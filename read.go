@@ -1686,13 +1686,6 @@ func decodeStructReadValue(tag tagDesc, myBytes *bytes.Buffer) (any, error) {
 		return myBytes.Bytes(), nil
 	}
 
-	if expectedSize, err := packedStructSize(tag.Struct); err == nil {
-		typeInfoLen := binary.Size(cipStructHeader{})
-		if expectedSize > 0 && myBytes.Len() == expectedSize+typeInfoLen {
-			_, _ = myBytes.Read(make([]byte, typeInfoLen))
-		}
-	}
-
 	targetType := reflect.TypeOf(tag.Struct)
 	for targetType.Kind() == reflect.Pointer {
 		targetType = targetType.Elem()
