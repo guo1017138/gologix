@@ -956,7 +956,7 @@ func estimateTagResponseSize(tag tagDesc) int {
 	if err != nil || size <= 0 {
 		size = tag.TagType.Size() * elements
 	}
-	return resultHdrSize + binary.Size(cipStructHeader{}) + size
+	return resultHdrSize + binary.Size(cipStructHeader{}) + size*elements
 }
 
 func packedStructSize(v any) (int, error) {

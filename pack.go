@@ -397,7 +397,7 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 				pad := make([]byte, rem)
 				_, err = r.Read(pad)
 				if err != nil {
-					return n, fmt.Errorf("problem reading padding bits. %v", err)
+					return n, fmt.Errorf("problem reading padding bits before field %s (%s) in %s at offset=%d align=%d rem=%d: %w", field.Name, field.Type, refType, n, a, rem, err)
 				}
 				n += rem
 			}
@@ -531,7 +531,7 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 			pad := make([]byte, rem)
 			_, err = r.Read(pad)
 			if err != nil {
-				return n, fmt.Errorf("problem reading padding bits. %v", err)
+				return n, fmt.Errorf("problem reading padding bits for field %s (%s) in %s at offset=%d align=%d rem=%d: %w", field.Name, field.Type, refType, n, a, rem, err)
 			}
 			n += rem
 		}
@@ -541,13 +541,13 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 			//binary.Read(r, p.Order(), refVal.Field(i).Interface())
 			err = binary.Read(r, p.Order(), refVal.Field(i).Addr().Interface())
 			if err != nil {
-				return n, fmt.Errorf("problem reading field data. %v", err)
+				return n, fmt.Errorf("problem reading field data for field %s (%s, kind=%s) in %s at offset=%d size=%d align=%d bitpos=%d: %w", field.Name, field.Type, k, refType, n, s, a, bitpos, err)
 			}
 		} else {
 			val := refVal.Field(i).Addr().Interface()
 			s, err = Unpack(r, val)
 			if err != nil {
-				return n, fmt.Errorf("problem unpacking sub-structure. %v", err)
+				return n, fmt.Errorf("problem unpacking sub-structure field %s (%s) in %s at offset=%d align=%d: %w", field.Name, field.Type, refType, n, a, err)
 			}
 		}
 		n += s
@@ -559,7 +559,7 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 				pad := make([]byte, rem)
 				_, err = r.Read(pad)
 				if err != nil {
-					return n, fmt.Errorf("problem reading padding bits. %v", err)
+					return n, fmt.Errorf("problem reading post-struct padding after field %s (%s) in %s at offset=%d align=%d rem=%d: %w", field.Name, field.Type, refType, n, a, rem, err)
 				}
 				n += rem
 			}
