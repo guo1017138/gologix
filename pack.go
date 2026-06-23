@@ -136,6 +136,11 @@ func Pack(w io.Writer, data any) (int, error) {
 		t := field.Tag.Get("pack")
 		s := int(field.Type.Size())
 		k := refVal.Field(i).Kind()
+
+		// V20 以及之前的版本，8字节长度的数据，也是4字节对齐。但是V23以及以后，8字节长度的数据，8字节对齐。为了兼容V20以及之前的版本，暂时强制四字节对齐
+		if a == 8 {
+			a = 4
+		}
 		if a > lastA {
 			// if the alignment of this field is bigger than the last one, we need to check whether we need to add padding to align to the new field's alignment
 			rem := a - (pos % a)
@@ -389,6 +394,11 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 		t := field.Tag.Get("pack")
 		s := int(field.Type.Size())
 		k := refVal.Field(i).Kind()
+
+		// V20 以及之前的版本，8字节长度的数据，也是4字节对齐。但是V23以及以后，8字节长度的数据，8字节对齐。为了兼容V20以及之前的版本，暂时强制四字节对齐
+		if a == 8 {
+			a = 4
+		}
 		if a > lastA {
 			// make sure we are writing the new data for this field to the properly aligned byte
 			rem := a - (n % a)
