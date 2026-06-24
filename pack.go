@@ -137,24 +137,6 @@ func Pack(w io.Writer, data any) (int, error) {
 		s := int(field.Type.Size())
 		k := refVal.Field(i).Kind()
 
-		// V20 以及之前的版本，8字节长度的数据，也是4字节对齐。但是V23以及以后，8字节长度的数据，8字节对齐。为了兼容V20以及之前的版本，暂时强制四字节对齐
-		if a == 8 {
-			a = 4
-		}
-		if a > lastA {
-			// if the alignment of this field is bigger than the last one, we need to check whether we need to add padding to align to the new field's alignment
-			rem := a - (pos % a)
-			if rem != a {
-				padding := make([]byte, rem)
-				_, err := w.Write(padding)
-				if err != nil {
-					return pos, fmt.Errorf("problem writing padding bytes: %w", err)
-				}
-				pos += rem
-			}
-		}
-		lastA = a
-
 		// if struct field has a byteIndex tag, use byteIndex to determine how many padding bits we need to write before writing the field data
 		byteIndexTag := field.Tag.Get("byteIndex")
 		if byteIndexTag != "" {
@@ -173,7 +155,21 @@ func Pack(w io.Writer, data any) (int, error) {
 				}
 				pos += remain
 			}
+		} else {
+			if a > lastA {
+				// if the alignment of this field is bigger than the last one, we need to check whether we need to add padding to align to the new field's alignment
+				rem := a - (pos % a)
+				if rem != a {
+					padding := make([]byte, rem)
+					_, err := w.Write(padding)
+					if err != nil {
+						return pos, fmt.Errorf("problem writing padding bytes: %w", err)
+					}
+					pos += rem
+				}
+			}
 		}
+		lastA = a
 
 		// if there isn't a nopack tag on the field, we need to check for bools that need combined into bytes
 		if t != "nopack" {
@@ -395,25 +391,6 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 		s := int(field.Type.Size())
 		k := refVal.Field(i).Kind()
 
-		// V20 以及之前的版本，8字节长度的数据，也是4字节对齐。但是V23以及以后，8字节长度的数据，8字节对齐。为了兼容V20以及之前的版本，暂时强制四字节对齐
-		if a == 8 {
-			a = 4
-		}
-		if a > lastA {
-			// make sure we are writing the new data for this field to the properly aligned byte
-			rem := a - (n % a)
-			if rem < a && rem > 0 {
-				// need paddding bits
-				pad := make([]byte, rem)
-				_, err = r.Read(pad)
-				if err != nil {
-					return n, fmt.Errorf("problem reading padding bits before field %s (%s) in %s at offset=%d align=%d rem=%d: %w", field.Name, field.Type, refType, n, a, rem, err)
-				}
-				n += rem
-			}
-		}
-		lastA = a
-
 		// if struct field has a byteIndex tag, we need to read bits until we get to that byte index before we can read the field data
 		byteIndexTag := field.Tag.Get("byteIndex")
 		if byteIndexTag != "" {
@@ -432,7 +409,22 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 				}
 				n += remain
 			}
+		} else {
+			if a > lastA {
+				// make sure we are writing the new data for this field to the properly aligned byte
+				rem := a - (n % a)
+				if rem < a && rem > 0 {
+					// need paddding bits
+					pad := make([]byte, rem)
+					_, err = r.Read(pad)
+					if err != nil {
+						return n, fmt.Errorf("problem reading padding bits before field %s (%s) in %s at offset=%d align=%d rem=%d: %w", field.Name, field.Type, refType, n, a, rem, err)
+					}
+					n += rem
+				}
+			}
 		}
+		lastA = a
 
 		// if there isn't a nopack tag on the field, we need to check for bools that need combined into bytes
 		if t != "nopack" {
