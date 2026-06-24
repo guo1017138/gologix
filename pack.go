@@ -26,7 +26,7 @@ func (p cipPack) Align(t reflect.Type) int {
 	// If any of the fields have an alignment of 8 (LINT, LREAL, etc...)
 	// then the struct also has an alignment of 8.
 	if t.Kind() == reflect.String {
-		return 4 // strings are a uint32 length followed by 84 bytes of data, so they have an alignment of 4
+		return 4 // strings are a uint32 length followed by 82 bytes of data, so they have an alignment of 4
 	}
 
 	if t.Kind() == reflect.Array || t.Kind() == reflect.Slice {
@@ -78,7 +78,7 @@ func Serialize(strs ...any) (*bytes.Buffer, error) {
 			if strlen%2 == 1 {
 				strlen++
 			}
-			b2 := make([]byte, 84)
+			b2 := make([]byte, 82)
 			copy(b2, serializable_str)
 			err = binary.Write(b, binary.LittleEndian, b2)
 			if err != nil {
@@ -221,13 +221,13 @@ func Pack(w io.Writer, data any) (int, error) {
 						if err != nil {
 							return pos, fmt.Errorf("problem writing string header: %w", err)
 						}
-						b2 := make([]byte, 84)
+						b2 := make([]byte, 82)
 						copy(b2, str)
 						err = binary.Write(w, binary.LittleEndian, b2)
 						if err != nil {
 							return pos, fmt.Errorf("problem writing string payload: %w", err)
 						}
-						pos += 88
+						pos += 86
 					}
 					continue
 				}
@@ -258,13 +258,13 @@ func Pack(w io.Writer, data any) (int, error) {
 				if err != nil {
 					return pos, fmt.Errorf("problem writing string header: %w", err)
 				}
-				b2 := make([]byte, 84)
+				b2 := make([]byte, 82)
 				copy(b2, str)
 				err = binary.Write(w, binary.LittleEndian, b2)
 				if err != nil {
 					return pos, fmt.Errorf("problem writing string payload: %w", err)
 				}
-				pos += 88
+				pos += 86
 				continue
 			}
 		}
@@ -281,16 +281,18 @@ func Pack(w io.Writer, data any) (int, error) {
 			pos += 1
 		}
 
-		// make sure we are writing the new data for this field to the properly aligned byte
-		rem := a - (pos % a)
-		if rem < a && rem > 0 {
-			// need paddding bits
-			pad := make([]byte, rem)
-			_, err := w.Write(pad)
-			if err != nil {
-				return pos, fmt.Errorf("problem writing pad to buffer. %v", err)
+		if byteIndexTag == "" {
+			// make sure we are writing the new data for this field to the properly aligned byte
+			rem := a - (pos % a)
+			if rem < a && rem > 0 {
+				// need paddding bits
+				pad := make([]byte, rem)
+				_, err := w.Write(pad)
+				if err != nil {
+					return pos, fmt.Errorf("problem writing pad to buffer. %v", err)
+				}
+				pos += rem
 			}
-			pos += rem
 		}
 
 		// finally, if the field is some sub-structure, recurse.  Otherwise we will write the data out
@@ -308,7 +310,7 @@ func Pack(w io.Writer, data any) (int, error) {
 			}
 		}
 		pos += s
-		if k == reflect.Struct {
+		if k == reflect.Struct && byteIndexTag == "" {
 			// make sure we are writing the new data for this field to the properly aligned byte
 			rem := a - (pos % a)
 			if rem < a && rem > 0 {
@@ -469,7 +471,7 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 				} else if at.Kind() == reflect.String {
 					l := arr.Len()
 					for ai := 0; ai < l; ai++ {
-						strArray := make([]byte, 88)
+						strArray := make([]byte, 86)
 						count, err := r.Read(strArray)
 						if err != nil || count < 86 {
 							return n, fmt.Errorf("problem reading packed string. count: %d, error: %v", count, err)
@@ -479,7 +481,7 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 							return n, fmt.Errorf("problem reading packed string. string length unexpected %d", strLen)
 						}
 						arr.Index(ai).SetString(string(strArray[4 : strLen+4]))
-						n += 88
+						n += 86
 					}
 					continue
 				}
@@ -504,7 +506,7 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 				}
 				continue
 			case reflect.String:
-				strArray := make([]byte, 88)
+				strArray := make([]byte, 86)
 				count, err := r.Read(strArray)
 				if err != nil || count < 86 {
 					return n, fmt.Errorf("problem reading packed string. count: %d, error: %v", count, err)
@@ -514,7 +516,7 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 					return n, fmt.Errorf("problem reading packed string. string length unexpected %d", strLen)
 				}
 				refVal.Field(i).SetString(string(strArray[4 : strLen+4]))
-				n += 88
+				n += 86
 				continue
 			}
 
@@ -526,16 +528,18 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 			bitpos = 0
 		}
 
-		// make sure we are writing the new data for this field to the properly aligned byte
-		rem := a - (n % a)
-		if rem < a && rem > 0 {
-			// need paddding bits
-			pad := make([]byte, rem)
-			_, err = r.Read(pad)
-			if err != nil {
-				return n, fmt.Errorf("problem reading padding bits for field %s (%s) in %s at offset=%d align=%d rem=%d: %w", field.Name, field.Type, refType, n, a, rem, err)
+		if byteIndexTag == "" {
+			// make sure we are writing the new data for this field to the properly aligned byte
+			rem := a - (n % a)
+			if rem < a && rem > 0 {
+				// need paddding bits
+				pad := make([]byte, rem)
+				_, err = r.Read(pad)
+				if err != nil {
+					return n, fmt.Errorf("problem reading padding bits for field %s (%s) in %s at offset=%d align=%d rem=%d: %w", field.Name, field.Type, refType, n, a, rem, err)
+				}
+				n += rem
 			}
-			n += rem
 		}
 
 		// finally, if the field is some sub-structure, recurse.  Otherwise we will write the data out
@@ -553,7 +557,7 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 			}
 		}
 		n += s
-		if k == reflect.Struct {
+		if k == reflect.Struct && byteIndexTag == "" {
 			// make sure we are writing the new data for this field to the properly aligned byte
 			rem := a - (n % a)
 			if rem < a && rem > 0 {
