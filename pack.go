@@ -211,6 +211,7 @@ func Pack(w io.Writer, data any) (int, error) {
 						}
 						pos += s
 					}
+					bitpos = 0
 					continue
 				} else if at.Kind() == reflect.String {
 					l := arr.Len()
@@ -229,8 +230,10 @@ func Pack(w io.Writer, data any) (int, error) {
 						}
 						pos += 86
 					}
+					bitpos = 0
 					continue
 				}
+				bitpos = 0
 			case reflect.Bool:
 				// try to pack bools
 				bval := refVal.Field(i).Bool()
@@ -265,6 +268,7 @@ func Pack(w io.Writer, data any) (int, error) {
 					return pos, fmt.Errorf("problem writing string payload: %w", err)
 				}
 				pos += 86
+				bitpos = 0
 				continue
 			}
 		}
@@ -467,6 +471,7 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 						}
 						n += s
 					}
+					bitpos = 0
 					continue
 				} else if at.Kind() == reflect.String {
 					l := arr.Len()
@@ -483,10 +488,12 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 						arr.Index(ai).SetString(string(strArray[4 : strLen+4]))
 						n += 86
 					}
+					bitpos = 0
 					continue
 				}
+				bitpos = 0
 			case reflect.Bool:
-				// try to pack bools
+				// try to unpack bools
 				if bitpos == 0 {
 					br := []byte{0}
 					_, err = r.Read(br)
@@ -517,9 +524,9 @@ func Unpack(r io.Reader, data any) (n int, err error) {
 				}
 				refVal.Field(i).SetString(string(strArray[4 : strLen+4]))
 				n += 86
+				bitpos = 0
 				continue
 			}
-
 		}
 
 		// we don't have a packable bool.  First thing we need to do is check whether there are some packed bools that still need flushed out.
