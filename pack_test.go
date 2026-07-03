@@ -2,6 +2,7 @@ package gologix
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 
 	"github.com/danomagnum/gologix/lgxtypes"
@@ -244,6 +245,9 @@ func TestEncodeBuiltinTypes(t *testing.T) {
 	type StringWrapper struct {
 		String lgxtypes.STRING
 	}
+	type PIDWrapper struct {
+		PID lgxtypes.PID
+	}
 	type TypeWithTimer struct {
 		Field0 int32
 		Flag1  bool
@@ -341,4 +345,105 @@ func TestEncodeBuiltinTypes(t *testing.T) {
 		t.Errorf("CRC0 mismatch. Have %x Want %x", crc, want_crc)
 	}
 
+	encoding, crc, err = TypeEncode(PIDWrapper{})
+	if err != nil {
+		t.Errorf("problem encoding PIDWrapper. %v", err)
+		return
+	}
+	want = "PIDWrapper,PID,DINT,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL[17]"
+	if encoding != want {
+		t.Errorf("ResultMismatch.\n Have %v\n Want %v\n", encoding, want)
+	}
+
+	want_crc = uint16(0x382c)
+	if crc != want_crc {
+		t.Errorf("CRC0 mismatch. Have %x Want %x", crc, want_crc)
+	}
+
+	encoding, crc, err = TypeEncode(lgxtypes.PID{})
+	if err != nil {
+		t.Errorf("problem encoding PID. %v", err)
+		return
+	}
+	want = "PID,DINT,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL,REAL[17]"
+	if encoding != want {
+		t.Errorf("ResultMismatch.\n Have %v\n Want %v\n", encoding, want)
+	}
+
+	want_crc = uint16(0x0F8A)
+	if crc != want_crc {
+		t.Errorf("CRC0 mismatch. Have %x Want %x", crc, want_crc)
+	}
+
+}
+
+func TestPackPID(t *testing.T) {
+	wantCtrl := uint32(1<<31 | 1<<29 | 1<<26 | 1<<24 | 1<<22 | 1<<20 | 1<<15 | 1<<13 | 1<<11 | 1<<9 | 1<<7)
+	pid := lgxtypes.PID{
+		CTL:    int32(wantCtrl),
+		SP:     1,
+		KP:     2,
+		KI:     3,
+		KD:     4,
+		BIAS:   5,
+		MAXS:   6,
+		MINS:   7,
+		DB:     8,
+		SO:     9,
+		MAXO:   10,
+		MINO:   11,
+		UPD:    12,
+		PV:     13,
+		ERR:    14,
+		OUT:    15,
+		PVH:    16,
+		PVL:    17,
+		DVP:    18,
+		DVN:    19,
+		PVDB:   20,
+		DVDB:   21,
+		MAXI:   22,
+		MINI:   23,
+		TIE:    24,
+		MAXCV:  25,
+		MINCV:  26,
+		MINTIE: 27,
+		MAXTIE: 28,
+		DATA:   [17]float32{29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45},
+		EN:     true,
+		CL:     true,
+		SWM:    true,
+		MO:     true,
+		NDF:    true,
+		NOZC:   true,
+		INI:    true,
+		OLL:    true,
+		EWD:    true,
+		DVPA:   true,
+		PVHA:   true,
+	}
+
+	var buf bytes.Buffer
+	n, err := Pack(&buf, pid)
+	if err != nil {
+		t.Fatalf("problem packing PID: %v", err)
+	}
+	if n != 184 {
+		t.Fatalf("PID packed length mismatch. Have %d Want %d", n, 184)
+	}
+	if got := binary.LittleEndian.Uint32(buf.Bytes()[:4]); got != wantCtrl {
+		t.Fatalf("PID control word mismatch. Have 0x%08x Want 0x%08x", got, wantCtrl)
+	}
+
+	var got lgxtypes.PID
+	n, err = Unpack(bytes.NewBuffer(buf.Bytes()), &got)
+	if err != nil {
+		t.Fatalf("problem unpacking PID: %v", err)
+	}
+	if n != 184 {
+		t.Fatalf("PID unpacked length mismatch. Have %d Want %d", n, 184)
+	}
+	if got != pid {
+		t.Fatalf("PID unpack mismatch.\n Have %+v\n Want %+v", got, pid)
+	}
 }
