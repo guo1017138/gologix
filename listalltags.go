@@ -341,7 +341,7 @@ func isValidTag(tag_string string, tag_ftr TagInfo) bool {
 		return false
 	}
 	if strings.Contains(tag_string, ":") {
-		if !strings.HasPrefix(tag_string, "Program") {
+		if !strings.HasPrefix(tag_string, "Program:") && !strings.HasPrefix(tag_string, "Local:") {
 			return false
 		}
 
