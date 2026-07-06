@@ -954,7 +954,13 @@ func estimateTagResponseSize(tag tagDesc) int {
 
 	size, err := packedStructSize(tag.Struct)
 	if err != nil || size <= 0 {
-		size = tag.TagType.Size() * elements
+		size = tag.TagType.Size()
+	}
+
+	// some UDT has a size that is not a multiple of 8, so we need to round up to the next multiple of 8 for the response size.
+	// estimated size can be bigger than actual size, but never smaller, so this is safe.
+	if rem := size % 8; rem != 0 {
+		size += 8 - rem
 	}
 	return resultHdrSize + binary.Size(cipStructHeader{}) + size*elements
 }

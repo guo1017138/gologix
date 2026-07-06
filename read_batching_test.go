@@ -30,6 +30,23 @@ func TestEstimateTagResponseSizeIncludesStructHeader(t *testing.T) {
 	}
 }
 
+func TestEstimateTagResponseSizeAlignsStructPayloadToEightBytes(t *testing.T) {
+	tag := tagDesc{
+		TagName:  "UDT1",
+		TagType:  CIPTypeStruct,
+		Elements: 1,
+		Struct: struct {
+			Count int32
+			Code  int16
+		}{},
+	}
+
+	want := binary.Size(msgMultiReadResult{}) + binary.Size(cipStructHeader{}) + 8
+	if got := estimateTagResponseSize(tag); got != want {
+		t.Fatalf("unexpected aligned struct response estimate: got %d want %d", got, want)
+	}
+}
+
 func TestSelectPackedTagIndexesSkipsOversizedGap(t *testing.T) {
 	client := &Client{ConnectionSize: 90}
 	largeUDT := struct {
