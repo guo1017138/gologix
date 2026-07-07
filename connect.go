@@ -574,6 +574,10 @@ func (client *Client) parseResponse(header *eipHeader, data *bytes.Buffer) ([]CI
 		return nil, fmt.Errorf("problem reading items from forward open request. %w", err)
 	}
 
+	if len(items) < 2 {
+		return nil, fmt.Errorf("not enough items in forward open response. expected 2, got %d", len(items))
+	}
+
 	respHeader := msgCIPMessageRouterResponse{}
 	err = items[1].DeSerialize(&respHeader)
 	if err != nil {
