@@ -25,13 +25,24 @@ const (
 // You don't even have to keep incrementing it.  just going back and forth between 1 and 0 works OK.
 // Use sequencer() instead of accessing this directly to achieve that.
 var sequenceValue uint32 = 0
+var connectionSerialValue uint32 = 0
 
 func init() {
 	rand.Seed(time.Now().UnixMicro())
 	sequenceValue = rand.Uint32()
+	connectionSerialValue = rand.Uint32()
 }
 func sequencer() uint32 {
 	return atomic.AddUint32(&sequenceValue, 1)
+}
+
+func nextConnectionSerialNumber() uint16 {
+	for {
+		serial := uint16(atomic.AddUint32(&connectionSerialValue, 1))
+		if serial != 0 {
+			return serial
+		}
+	}
 }
 
 // Defines parameters from the host CIP device that the client will connect to

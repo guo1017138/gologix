@@ -517,3 +517,141 @@ func (s CIPStatus) String() string {
 		return fmt.Sprintf("Unknown CIPStatus: 0x%X (reserved for object class and service errors)", byte(s))
 	}
 }
+
+// CIPExtendedStatus represents an Allen-Bradley extended status word.
+//
+// from https://docs.aveva.com/bundle/sp-cdp-drivers/page/192997.html
+type CIPExtendedStatus uint16
+
+const (
+	CIPExtendedStatus_BeginningOffsetBeyondTemplateEnd              CIPExtendedStatus = 0x2104
+	CIPExtendedStatus_AccessBeyondDataObjectEnd                     CIPExtendedStatus = 0x2105
+	CIPExtendedStatus_DataInUse                                     CIPExtendedStatus = 0x2106
+	CIPExtendedStatus_AbbreviatedTypeMismatch                       CIPExtendedStatus = 0x2107
+	CIPExtendedStatus_ConnectionInUseOrDuplicateForwardOpen         CIPExtendedStatus = 0x0100
+	CIPExtendedStatus_TransportClassTriggerCombinationNotSupported  CIPExtendedStatus = 0x0103
+	CIPExtendedStatus_OwnershipConflict                             CIPExtendedStatus = 0x0106
+	CIPExtendedStatus_ConnectionNotFoundAtTargetApplication         CIPExtendedStatus = 0x0107
+	CIPExtendedStatus_InvalidConnectionType                         CIPExtendedStatus = 0x0108
+	CIPExtendedStatus_InvalidConnectionSize                         CIPExtendedStatus = 0x0109
+	CIPExtendedStatus_DeviceNotConfigured                           CIPExtendedStatus = 0x0110
+	CIPExtendedStatus_RPINotSupported                               CIPExtendedStatus = 0x0111
+	CIPExtendedStatus_ConnectionManagerCannotSupportMoreConnections CIPExtendedStatus = 0x0113
+	CIPExtendedStatus_KeySegmentVendorIDOrProductCodeMismatch       CIPExtendedStatus = 0x0114
+	CIPExtendedStatus_KeySegmentProductTypeMismatch                 CIPExtendedStatus = 0x0115
+	CIPExtendedStatus_KeySegmentRevisionMismatch                    CIPExtendedStatus = 0x0116
+	CIPExtendedStatus_InvalidConnectionPoint                        CIPExtendedStatus = 0x0117
+	CIPExtendedStatus_InvalidConfigurationFormat                    CIPExtendedStatus = 0x0118
+	CIPExtendedStatus_NoControllingConnectionOpen                   CIPExtendedStatus = 0x0119
+	CIPExtendedStatus_TargetApplicationCannotSupportMoreConnections CIPExtendedStatus = 0x011A
+	CIPExtendedStatus_RPISmallerThanProductionInhibitTime           CIPExtendedStatus = 0x011B
+	CIPExtendedStatus_ConnectionTimedOutBeforeClose                 CIPExtendedStatus = 0x0203
+	CIPExtendedStatus_UnconnectedSendTimedOut                       CIPExtendedStatus = 0x0204
+	CIPExtendedStatus_UnconnectedSendParameterError                 CIPExtendedStatus = 0x0205
+	CIPExtendedStatus_UnconnectedMessageTooLarge                    CIPExtendedStatus = 0x0206
+	CIPExtendedStatus_UnconnectedAcknowledgeWithoutReply            CIPExtendedStatus = 0x0207
+	CIPExtendedStatus_NoBufferMemoryAvailable                       CIPExtendedStatus = 0x0301
+	CIPExtendedStatus_NetworkBandwidthNotAvailable                  CIPExtendedStatus = 0x0302
+	CIPExtendedStatus_NoTagFiltersAvailable                         CIPExtendedStatus = 0x0303
+	CIPExtendedStatus_NotConfiguredToSendRealTimeData               CIPExtendedStatus = 0x0304
+	CIPExtendedStatus_PortSegmentNotAvailable                       CIPExtendedStatus = 0x0311
+	CIPExtendedStatus_LinkAddressPortSegmentNotAvailable            CIPExtendedStatus = 0x0312
+	CIPExtendedStatus_InvalidPathSegmentTypeOrValue                 CIPExtendedStatus = 0x0315
+	CIPExtendedStatus_PathAndConnectionNotEqualInClose              CIPExtendedStatus = 0x0316
+	CIPExtendedStatus_NetworkSegmentMissingOrInvalid                CIPExtendedStatus = 0x0317
+	CIPExtendedStatus_LinkAddressToSelfInvalid                      CIPExtendedStatus = 0x0318
+	CIPExtendedStatus_ResourcesOnSecondaryUnavailable               CIPExtendedStatus = 0x0319
+	CIPExtendedStatus_ConnectionAlreadyEstablished                  CIPExtendedStatus = 0x031A
+	CIPExtendedStatus_DirectConnectionAlreadyEstablished            CIPExtendedStatus = 0x031B
+	CIPExtendedStatus_Miscellaneous                                 CIPExtendedStatus = 0x031C
+	CIPExtendedStatus_RedundantConnectionMismatch                   CIPExtendedStatus = 0x031D
+)
+
+func (s CIPExtendedStatus) String() string {
+	switch s {
+	case CIPExtendedStatus_BeginningOffsetBeyondTemplateEnd:
+		return "The beginning offset was beyond the end of the template."
+	case CIPExtendedStatus_AccessBeyondDataObjectEnd:
+		return "You have tried to access beyond the end of the data object."
+	case CIPExtendedStatus_DataInUse:
+		return "Data in use."
+	case CIPExtendedStatus_AbbreviatedTypeMismatch:
+		return "The abbreviated type does not match the data type of the data object."
+	case CIPExtendedStatus_ConnectionInUseOrDuplicateForwardOpen:
+		return "Connection in Use or Duplicate Forward Open."
+	case CIPExtendedStatus_TransportClassTriggerCombinationNotSupported:
+		return "Transport Class and Trigger combination not supported."
+	case CIPExtendedStatus_OwnershipConflict:
+		return "Ownership Conflict."
+	case CIPExtendedStatus_ConnectionNotFoundAtTargetApplication:
+		return "Connection not found at target application."
+	case CIPExtendedStatus_InvalidConnectionType:
+		return "Invalid Connection Type. Indicates a problem with either the Connection Type or Priority of the Connection."
+	case CIPExtendedStatus_InvalidConnectionSize:
+		return "Invalid Connection Size."
+	case CIPExtendedStatus_DeviceNotConfigured:
+		return "Device not configured"
+	case CIPExtendedStatus_RPINotSupported:
+		return "RPI not supported. May also indicate problem with connection time-out multiplier."
+	case CIPExtendedStatus_ConnectionManagerCannotSupportMoreConnections:
+		return "Connection Manager cannot support any more connections."
+	case CIPExtendedStatus_KeySegmentVendorIDOrProductCodeMismatch:
+		return "Either the Vendor ID or the Product Code in the key segment did not match the device."
+	case CIPExtendedStatus_KeySegmentProductTypeMismatch:
+		return "Product Type in the key segment did not match the device."
+	case CIPExtendedStatus_KeySegmentRevisionMismatch:
+		return "Major or Minor Revision information in the key segment did not match the device."
+	case CIPExtendedStatus_InvalidConnectionPoint:
+		return "Invalid Connection Point."
+	case CIPExtendedStatus_InvalidConfigurationFormat:
+		return "Invalid Configuration Format."
+	case CIPExtendedStatus_NoControllingConnectionOpen:
+		return "Connection request fails since there is no controlling connection currently open."
+	case CIPExtendedStatus_TargetApplicationCannotSupportMoreConnections:
+		return "Target Application cannot support any more connections."
+	case CIPExtendedStatus_RPISmallerThanProductionInhibitTime:
+		return "RPI is smaller than the Production Inhibit Time."
+	case CIPExtendedStatus_ConnectionTimedOutBeforeClose:
+		return "Connection cannot be closed since the connection has timed out."
+	case CIPExtendedStatus_UnconnectedSendTimedOut:
+		return "Unconnected Send timed out waiting for a response."
+	case CIPExtendedStatus_UnconnectedSendParameterError:
+		return "Parameter Error in Unconnected Send Service."
+	case CIPExtendedStatus_UnconnectedMessageTooLarge:
+		return "Message too large for Unconnected message service."
+	case CIPExtendedStatus_UnconnectedAcknowledgeWithoutReply:
+		return "Unconnected acknowledge without reply."
+	case CIPExtendedStatus_NoBufferMemoryAvailable:
+		return "No buffer memory available."
+	case CIPExtendedStatus_NetworkBandwidthNotAvailable:
+		return "Network Bandwidth not available for data."
+	case CIPExtendedStatus_NoTagFiltersAvailable:
+		return "No Tag filters available."
+	case CIPExtendedStatus_NotConfiguredToSendRealTimeData:
+		return "Not Configured to send real-time data."
+	case CIPExtendedStatus_PortSegmentNotAvailable:
+		return "Port specified in Port Segment Not Available."
+	case CIPExtendedStatus_LinkAddressPortSegmentNotAvailable:
+		return "Link Address specified in Port Segment Not Available."
+	case CIPExtendedStatus_InvalidPathSegmentTypeOrValue:
+		return "Invalid Segment Type or Segment Value in Path."
+	case CIPExtendedStatus_PathAndConnectionNotEqualInClose:
+		return "Path and Connection not equal in close."
+	case CIPExtendedStatus_NetworkSegmentMissingOrInvalid:
+		return "Either Segment not present or Encoded Value in Network Segment is invalid."
+	case CIPExtendedStatus_LinkAddressToSelfInvalid:
+		return "Link Address to Self Invalid."
+	case CIPExtendedStatus_ResourcesOnSecondaryUnavailable:
+		return "Resources on Secondary Unavailable."
+	case CIPExtendedStatus_ConnectionAlreadyEstablished:
+		return "Connection already established."
+	case CIPExtendedStatus_DirectConnectionAlreadyEstablished:
+		return "Direct connection already established."
+	case CIPExtendedStatus_Miscellaneous:
+		return "Miscellaneous."
+	case CIPExtendedStatus_RedundantConnectionMismatch:
+		return "Redundant connection mismatch."
+	default:
+		return fmt.Sprintf("Unknown CIPExtendedStatus: 0x%04X", uint16(s))
+	}
+}

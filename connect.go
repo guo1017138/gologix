@@ -347,7 +347,7 @@ func (client *Client) newForwardOpenLarge() (CIPItem, error) {
 		return item, fmt.Errorf("couldn't build path. %w", err)
 	}
 
-	client.ConnectionSerialNumber = uint16(client.sequenceNumber.Add(1))
+	client.ConnectionSerialNumber = nextConnectionSerialNumber()
 	const (
 		redundantOwner     uint32 = 0 // 0 = no-redundant, 1 = redundant
 		connectionType     uint32 = 2 // 0 = null, 1 = multicast, 2 = point to point, 3 = reserved
@@ -426,7 +426,7 @@ func (client *Client) newForwardOpenStandard() (CIPItem, error) {
 		return item, fmt.Errorf("couldn't build path. %w", err)
 	}
 
-	client.ConnectionSerialNumber = uint16(client.sequenceNumber.Add(1))
+	client.ConnectionSerialNumber = nextConnectionSerialNumber()
 	const (
 		redundantOwner     uint16 = 0 // 0 = no-redundant, 1 = redundant
 		connectionType     uint16 = 2 // 0 = null, 1 = multicast, 2 = point to point, 3 = reserved
@@ -584,20 +584,26 @@ func (client *Client) parseResponse(header *eipHeader, data *bytes.Buffer) ([]CI
 		return nil, fmt.Errorf("error deserializing forward open response header. %w", err)
 	}
 
-	extended_status := make([]byte, respHeader.StatusLen*2)
+	extendedStatus := make([]CIPExtendedStatus, respHeader.StatusLen)
 	if respHeader.StatusLen != 0 {
-		err = items[1].DeSerialize(&extended_status)
+		err = items[1].DeSerialize(&extendedStatus)
 		if err != nil {
 			return nil, fmt.Errorf("error deserializing forward open response header extended status. %w", err)
 		}
 	}
+
 	if respHeader.Status != CIPStatus_OK {
 		errMsg := "bad status on response"
-		client.Logger.Error(errMsg,
+		errMsgArgs := []any{
 			slog.Any("status", respHeader.Status),
 			slog.String("statusDesc", respHeader.Status.String()),
-		)
-		return nil, fmt.Errorf("%s status: %v", errMsg, respHeader.Status)
+		}
+		for i, es := range extendedStatus {
+			errMsgArgs = append(errMsgArgs, slog.String(fmt.Sprintf("extended status %d", i), es.String()))
+		}
+		client.Logger.Error(errMsg, errMsgArgs...)
+
+		return nil, fmt.Errorf("%s status: %v, extended status: %v", errMsg, respHeader.Status, extendedStatus)
 	}
 	return items, nil
 }

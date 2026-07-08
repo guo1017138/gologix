@@ -363,7 +363,7 @@ func SubscribeImplicit[T any](client *Client, cfg ImplicitSubscriptionConfig) (*
 		}
 	}
 
-	serial := uint16(client.sequenceNumber.Add(1))
+	serial := nextConnectionSerialNumber()
 	otID := client.sequenceNumber.Add(1)
 	toID := client.sequenceNumber.Add(1)
 
