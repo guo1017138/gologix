@@ -31,7 +31,7 @@ func (client *Client) ReadTagGroup(group *TagGroup, args ...any) (*TagGroupResul
 		m[name] = zeroValueForTagDef(def)
 	}
 
-	err = client.ReadMap(m)
+	_, err = client.ReadMap(m)
 	if err != nil {
 		return nil, fmt.Errorf("tag group read failed: %w", err)
 	}

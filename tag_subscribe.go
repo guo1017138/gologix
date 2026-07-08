@@ -329,7 +329,7 @@ func (sub *TagMultiSubscription) run(client *Client, batches []map[string]any, p
 				batch := batches[batchIndex]
 				batchIndex = (batchIndex + 1) % len(batches)
 
-				if err := client.ReadMap(batch); err != nil {
+				if _, err := client.ReadMap(batch); err != nil {
 					select {
 					case sub.errs <- err:
 					default:

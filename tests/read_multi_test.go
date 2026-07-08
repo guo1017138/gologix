@@ -83,7 +83,7 @@ func TestReadMap(t *testing.T) {
 			mr["TestDintArr[2]"] = make([]int32, 5)
 
 			// call the read multi function with the structure passed in as a pointer.
-			err = client.ReadMap(mr)
+			_, err = client.ReadMap(mr)
 			if err != nil {
 				log.Printf("error reading testint. %v", err)
 			}
@@ -141,7 +141,7 @@ func TestReadMapAny(t *testing.T) {
 			mr["TestDintArr[2]"] = nil
 
 			// call the read multi function with the structure passed in as a pointer.
-			err = client.ReadMap(mr)
+			_, err = client.ReadMap(mr)
 			if err != nil {
 				log.Printf("error reading testint. %v", err)
 			}

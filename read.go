@@ -726,7 +726,8 @@ type cipStructHeader struct {
 func (client *Client) ReadMulti(tag_str any, args ...any) error {
 	switch x := tag_str.(type) {
 	case map[string]any:
-		return client.ReadMap(x)
+		_, err := client.ReadMap(x)
+		return err
 	}
 
 	err := client.checkConnection()
@@ -1328,11 +1329,11 @@ type msgCIPFragIOIFooter struct {
 //
 // For struct-based reading with field tags, use ReadMulti instead.
 // For reading tags with unknown types, set map values to nil.
-func (client *Client) ReadMap(m map[string]any) error {
+func (client *Client) ReadMap(m map[string]any) (processedTags []string, err error) {
 
-	err := client.checkConnection()
+	err = client.checkConnection()
 	if err != nil {
-		return fmt.Errorf("could not start multi read: %w", err)
+		return processedTags, fmt.Errorf("could not start multi read: %w", err)
 	}
 
 	total := len(m)
@@ -1361,12 +1362,12 @@ func (client *Client) ReadMap(m map[string]any) error {
 	for len(pending) > 0 {
 		selectedOrig, chosenTags, _, nextPending, err := selectPackedTagBatch(client, pending, tags, nil)
 		if err != nil {
-			return err
+			return processedTags, err
 		}
 		msgs += 1
 		subResults, err := client.readListFragAll(chosenTags)
 		if err != nil {
-			return err
+			return processedTags, err
 		}
 		for i, val := range subResults {
 			resultValues[selectedOrig[i]] = val
@@ -1376,10 +1377,11 @@ func (client *Client) ReadMap(m map[string]any) error {
 
 	for i := range resultValues {
 		m[indexes[i]] = resultValues[i]
+		processedTags = append(processedTags, indexes[i])
 	}
 
 	client.Logger.Debug("Multi Read", "messages", msgs, "tags", total)
-	return nil
+	return processedTags, nil
 }
 
 // ReadMapFrag reads multiple tags using CIP Fragmented Read service (0x52).
@@ -1390,10 +1392,10 @@ func (client *Client) ReadMap(m map[string]any) error {
 //
 // For very large tag sets, this method may still split requests internally to fit the
 // connection size, but each chunk uses 0x52 and handles partial transfers transparently.
-func (client *Client) ReadMapFrag(m map[string]any) error {
-	err := client.checkConnection()
+func (client *Client) ReadMapFrag(m map[string]any) (processedTags []string, err error) {
+	err = client.checkConnection()
 	if err != nil {
-		return fmt.Errorf("could not start fragmented multi read: %w", err)
+		return processedTags, fmt.Errorf("could not start fragmented multi read: %w", err)
 	}
 
 	total := len(m)
@@ -1422,11 +1424,11 @@ func (client *Client) ReadMapFrag(m map[string]any) error {
 	for len(pending) > 0 {
 		selectedOrig, chosenTags, _, nextPending, err := selectPackedTagBatch(client, pending, tags, nil)
 		if err != nil {
-			return err
+			return processedTags, err
 		}
 		subResults, err := client.readListFragAll(chosenTags)
 		if err != nil {
-			return err
+			return processedTags, err
 		}
 		for i, val := range subResults {
 			resultValues[selectedOrig[i]] = val
@@ -1436,9 +1438,10 @@ func (client *Client) ReadMapFrag(m map[string]any) error {
 
 	for i := range resultValues {
 		m[indexes[i]] = resultValues[i]
+		processedTags = append(processedTags, indexes[i])
 	}
 
-	return nil
+	return processedTags, nil
 }
 
 func (client *Client) countFragIOIsThatFit(tags []tagDesc) (int, error) {
@@ -1630,27 +1633,27 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 			end = int(offsetTable[i+1]) + 10
 		}
 		if start < 0 || start > len(rb) || end < start || end > len(rb) {
-			return nil, fmt.Errorf("invalid fragmented offset boundaries for item %d", i)
+			return nil, fmt.Errorf("invalid fragmented offset boundaries for item %d %s", i, tags[i].TagName)
 		}
 
 		entry := rb[start:end]
 		if len(entry) < SizeOf(msgMultiReadResult{}) {
-			return nil, fmt.Errorf("fragmented response entry %d too short", i)
+			return nil, fmt.Errorf("fragmented response of entry %d %s too short, start %d, end %d, items %d, offset table: %v", i, tags[i].TagName, start, end, rItem, offsetTable)
 		}
 
 		entryBuf := bytes.NewBuffer(entry)
 		rHdr := msgMultiReadResult{}
 		err = binary.Read(entryBuf, binary.LittleEndian, &rHdr)
 		if err != nil {
-			return nil, fmt.Errorf("problem reading fragmented multi result header. %w", err)
+			return nil, fmt.Errorf("problem reading fragmented multi result header for item %d %s: %w", i, tags[i].TagName, err)
 		}
 
 		if !rHdr.Service.IsResponse() {
-			return nil, fmt.Errorf("mixed item %d was not a response service. Got %v", i, rHdr.Service)
+			return nil, fmt.Errorf("mixed item %d %s was not a response service. Got %v", i, tags[i].TagName, rHdr.Service)
 		}
 		rHdr.Service = rHdr.Service.UnResponse()
 		if rHdr.Service != CIPService_FragRead && rHdr.Service != CIPService_Read {
-			return nil, fmt.Errorf("mixed item %d had unexpected service %v", i, rHdr.Service)
+			return nil, fmt.Errorf("mixed item %d %s had unexpected service %v", i, tags[i].TagName, rHdr.Service)
 		}
 
 		status := CIPStatus(rHdr.Status & 0xFF)
@@ -1668,13 +1671,13 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 			typeInfo := cipStructHeader{}
 			err = binary.Read(entryBuf, binary.LittleEndian, &typeInfo)
 			if err != nil {
-				return nil, fmt.Errorf("problem reading additional type info header for item %d: %w", i, err)
+				return nil, fmt.Errorf("problem reading additional type info header for item %d %s: %w", i, tags[i].TagName, err)
 			}
 		}
 		payload := make([]byte, entryBuf.Len())
 		_, err = entryBuf.Read(payload)
 		if err != nil {
-			return nil, fmt.Errorf("problem reading fragmented payload for item %d: %w", i, err)
+			return nil, fmt.Errorf("problem reading fragmented payload for item %d %s: %w", i, tags[i].TagName, err)
 		}
 
 		results[i] = fragReadTagResult{

@@ -65,7 +65,7 @@ func main() {
 	mr["TestInt"] = nil
 	mr["Program:Gologix_Tests.ReadUDT"] = nil
 
-	err = client.ReadMap(mr)
+	_, err = client.ReadMap(mr)
 	if err != nil {
 		log.Printf("error reading map. %v", err)
 	}
