@@ -12,7 +12,8 @@ func (client *Client) startDisconnect() error {
 	case connectionStatusDisconnected:
 		return fmt.Errorf("client is already disconnected")
 	case connectionStatusConnecting:
-		return fmt.Errorf("client is still connecting, cannot disconnect")
+		client.connStatus = connectionStatusDisconnecting
+		return nil
 	case connectionStatusConnected:
 		// continue to disconnect
 		client.connStatus = connectionStatusDisconnecting
@@ -132,9 +133,11 @@ func (client *Client) Disconnect() error {
 		}
 	}
 
-	err = client.conn.Close()
-	if err != nil {
-		client.Logger.Error("error closing connection", slog.Any("err", err))
+	if client.conn != nil {
+		err = client.conn.Close()
+		if err != nil {
+			client.Logger.Error("error closing connection", slog.Any("err", err))
+		}
 	}
 
 	client.Logger.Info("successfully disconnected from controller")
