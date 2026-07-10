@@ -300,8 +300,13 @@ func (client *Client) readListWithIOIs(tags []tagDesc, iois []*tagIOI) ([]any, e
 			continue
 		}
 
+		var typeHdr msgMultiReadResultTypeHdr
+		if err := binary.Read(myBytes, binary.LittleEndian, &typeHdr); err != nil {
+			return nil, fmt.Errorf("problem reading multi result type header for item %d: %w", i, err)
+		}
+
 		payload := myBytes.Bytes()
-		val, err := decodeReadTagValue(tags[i], iois[i], rHdr.Type, payload)
+		val, err := decodeReadTagValue(tags[i], iois[i], typeHdr.Type, payload, cipStatus)
 		if err != nil {
 			return nil, fmt.Errorf("problem decoding value for instance %s: %w", tags[i].TagName, err)
 		}
@@ -320,6 +325,7 @@ func (client *Client) readListFragWithIOIsAll(tags []tagDesc, iois []*tagIOI) ([
 	offsets := make([]uint32, qty)
 	chunks := make([]bytes.Buffer, qty)
 	respTypes := make([]CIPType, qty)
+	status := make([]CIPStatus, qty)
 	pending := make([]int, qty)
 	for i := range pending {
 		pending[i] = i
@@ -347,19 +353,18 @@ func (client *Client) readListFragWithIOIsAll(tags []tagDesc, iois []*tagIOI) ([
 		nextPending := make([]int, 0, len(pending))
 		for i, rr := range roundResults {
 			idx := pending[i]
-			if rr.Status != CIPStatus_OK && rr.Status != CIPStatus_PartialTransfer {
-				return nil, fmt.Errorf("problem reading tag %s. Status %v", tags[idx].TagName, rr.Status)
-			}
-
-			if respTypes[idx] == 0 {
-				respTypes[idx] = rr.Type
-			}
-
-			if len(rr.Data) > 0 {
-				if _, err := chunks[idx].Write(rr.Data); err != nil {
-					return nil, fmt.Errorf("problem accumulating fragmented payload for %s: %w", tags[idx].TagName, err)
+			status[idx] = rr.Status
+			if rr.Status == CIPStatus_OK {
+				if respTypes[idx] == 0 {
+					respTypes[idx] = rr.Type
 				}
-				offsets[idx] += uint32(len(rr.Data))
+
+				if len(rr.Data) > 0 {
+					if _, err := chunks[idx].Write(rr.Data); err != nil {
+						return nil, fmt.Errorf("problem accumulating fragmented payload for %s: %w", tags[idx].TagName, err)
+					}
+					offsets[idx] += uint32(len(rr.Data))
+				}
 			}
 
 			if rr.Status == CIPStatus_PartialTransfer {
@@ -371,7 +376,7 @@ func (client *Client) readListFragWithIOIsAll(tags []tagDesc, iois []*tagIOI) ([
 
 	resultValues := make([]any, qty)
 	for i := range tags {
-		val, err := decodeReadTagValue(tags[i], iois[i], respTypes[i], chunks[i].Bytes())
+		val, err := decodeReadTagValue(tags[i], iois[i], respTypes[i], chunks[i].Bytes(), status[i])
 		if err != nil {
 			return nil, fmt.Errorf("problem decoding fragmented instance read value for %s: %w", tags[i].TagName, err)
 		}

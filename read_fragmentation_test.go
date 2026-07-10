@@ -105,7 +105,7 @@ func TestDecodeReadTagValueStructSlice(t *testing.T) {
 		TagType:  CIPTypeStruct,
 		Elements: len(want),
 		Struct:   make([]sampleUDT, len(want)),
-	}, &tagIOI{}, CIPTypeStruct, payload.Bytes())
+	}, &tagIOI{}, CIPTypeStruct, payload.Bytes(), CIPStatus_OK)
 	if err != nil {
 		t.Fatalf("decodeReadTagValue returned error: %v", err)
 	}

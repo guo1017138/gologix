@@ -1175,14 +1175,19 @@ func (client *Client) readList(tags []tagDesc) ([]any, error) {
 			result_values[i] = fmt.Errorf("problem reading tag %s. Status %v", tags[i].TagName, CIPStatus(status))
 			continue
 		}
+		typeHdr := msgMultiReadResultTypeHdr{}
+		err = binary.Read(myBytes, binary.LittleEndian, &typeHdr)
+		if err != nil {
+			return nil, fmt.Errorf("problem reading multi result type header. %w", err)
+		}
 		if tags[i].Elements == 1 {
-			if tags[i].TagType == CIPTypeBOOL && rHdr.Type != CIPTypeBOOL && iois[i].BitAccess {
+			if tags[i].TagType == CIPTypeBOOL && typeHdr.Type != CIPTypeBOOL && iois[i].BitAccess {
 				// we have requested a bool from some other type.  Maybe a bit access?
-				value, err := readValue(rHdr.Type, myBytes)
+				value, err := readValue(typeHdr.Type, myBytes)
 				if err != nil {
 					return nil, fmt.Errorf("problem reading tag %v: %w", tags[i], err)
 				}
-				val, err := getBit(rHdr.Type, value, iois[i].BitPosition)
+				val, err := getBit(typeHdr.Type, value, iois[i].BitPosition)
 				if err != nil {
 					client.Logger.Warn("problem reading value for this guy")
 					continue
@@ -1200,7 +1205,7 @@ func (client *Client) readList(tags []tagDesc) ([]any, error) {
 					return nil, fmt.Errorf("couldn't unpack struct data. %w", err)
 				}
 				result_values[i] = string(str)
-			} else if rHdr.Type == CIPTypeStruct {
+			} else if typeHdr.Type == CIPTypeStruct {
 				typehash := cipStructHeader{}
 				err := binary.Read(myBytes, binary.LittleEndian, &typehash)
 				if err != nil {
@@ -1222,7 +1227,7 @@ func (client *Client) readList(tags []tagDesc) ([]any, error) {
 				y := reflect.ValueOf(x).Elem().Interface()
 				result_values[i] = y
 			} else {
-				result_values[i], err = rHdr.Type.readValue(myBytes)
+				result_values[i], err = typeHdr.Type.readValue(myBytes)
 				if err != nil {
 					return nil, fmt.Errorf("problem reading tag %v: %w", tags[i], err)
 				}
@@ -1232,7 +1237,7 @@ func (client *Client) readList(tags []tagDesc) ([]any, error) {
 			// multi-element type.
 			val := make([]any, tags[i].Elements)
 			for respIndex := 0; respIndex < tags[i].Elements; respIndex++ {
-				value, err := readValue(rHdr.Type, myBytes)
+				value, err := readValue(typeHdr.Type, myBytes)
 				if err != nil {
 					return nil, fmt.Errorf("problem reading tag %v: %w", tags[i], err)
 				}
@@ -1269,9 +1274,12 @@ type msgMultiReadResultHeader struct {
 }
 
 type msgMultiReadResult struct {
-	Service     CIPService
-	Reserved    byte
-	Status      uint16
+	Service  CIPService
+	Reserved byte
+	Status   uint16
+}
+
+type msgMultiReadResultTypeHdr struct {
 	Type        CIPType
 	TypeInfoLen byte // Additional type metadata bytes following Type; for structs this is typically 0x02 (`A0 02 <uint16-handle>`).
 }
@@ -1659,15 +1667,21 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 		status := CIPStatus(rHdr.Status & 0xFF)
 		if rHdr.Service == CIPService_FragRead {
 			if status != CIPStatus_OK && status != CIPStatus_PartialTransfer {
-				results[i] = fragReadTagResult{Status: status, Type: rHdr.Type}
+				results[i] = fragReadTagResult{Status: status}
 				continue
 			}
 		} else if status != CIPStatus_OK {
-			results[i] = fragReadTagResult{Status: status, Type: rHdr.Type}
+			results[i] = fragReadTagResult{Status: status}
 			continue
 		}
 
-		if rHdr.TypeInfoLen != 0 {
+		typeHdr := msgMultiReadResultTypeHdr{}
+		err = binary.Read(entryBuf, binary.LittleEndian, &typeHdr)
+		if err != nil {
+			return nil, fmt.Errorf("problem reading fragmented multi result type header for item %d %s: %w", i, tags[i].TagName, err)
+		}
+
+		if typeHdr.TypeInfoLen != 0 {
 			typeInfo := cipStructHeader{}
 			err = binary.Read(entryBuf, binary.LittleEndian, &typeInfo)
 			if err != nil {
@@ -1682,7 +1696,7 @@ func (client *Client) readListFragRound(tags []tagDesc, iois []*tagIOI, offsets 
 
 		results[i] = fragReadTagResult{
 			Status: status,
-			Type:   rHdr.Type,
+			Type:   typeHdr.Type,
 			Data:   payload,
 		}
 	}
@@ -1743,7 +1757,10 @@ func decodeStructReadValue(tag tagDesc, myBytes *bytes.Buffer) (any, error) {
 	}
 }
 
-func decodeReadTagValue(tag tagDesc, ioi *tagIOI, respType CIPType, payload []byte) (any, error) {
+func decodeReadTagValue(tag tagDesc, ioi *tagIOI, respType CIPType, payload []byte, status CIPStatus) (any, error) {
+	if status != CIPStatus_OK {
+		return fmt.Errorf("tag %s read failed with status %v", tag.TagName, status), nil
+	}
 	myBytes := bytes.NewBuffer(payload)
 
 	if tag.Elements == 1 {
@@ -1806,6 +1823,7 @@ func (client *Client) readListFragAll(tags []tagDesc) ([]any, error) {
 	chunks := make([]bytes.Buffer, qty)
 	respTypes := make([]CIPType, qty)
 	pending := make([]int, qty)
+	status := make([]CIPStatus, qty)
 	for i := range pending {
 		pending[i] = i
 	}
@@ -1832,20 +1850,19 @@ func (client *Client) readListFragAll(tags []tagDesc) ([]any, error) {
 		nextPending := make([]int, 0, len(pending))
 		for i, rr := range roundResults {
 			idx := pending[i]
-			if rr.Status != CIPStatus_OK && rr.Status != CIPStatus_PartialTransfer {
-				return nil, fmt.Errorf("problem reading tag %s. Status %v", tags[idx].TagName, rr.Status)
-			}
-
-			if respTypes[idx] == 0 {
-				respTypes[idx] = rr.Type
-			}
-
-			if len(rr.Data) > 0 {
-				_, err := chunks[idx].Write(rr.Data)
-				if err != nil {
-					return nil, fmt.Errorf("problem accumulating fragmented payload for %s: %w", tags[idx].TagName, err)
+			status[idx] = rr.Status
+			if rr.Status == CIPStatus_OK {
+				if respTypes[idx] == 0 {
+					respTypes[idx] = rr.Type
 				}
-				offsets[idx] += uint32(len(rr.Data))
+
+				if len(rr.Data) > 0 {
+					_, err := chunks[idx].Write(rr.Data)
+					if err != nil {
+						return nil, fmt.Errorf("problem accumulating fragmented payload for %s: %w", tags[idx].TagName, err)
+					}
+					offsets[idx] += uint32(len(rr.Data))
+				}
 			}
 
 			if rr.Status == CIPStatus_PartialTransfer {
@@ -1857,7 +1874,7 @@ func (client *Client) readListFragAll(tags []tagDesc) ([]any, error) {
 
 	resultValues := make([]any, qty)
 	for i := range tags {
-		val, err := decodeReadTagValue(tags[i], iois[i], respTypes[i], chunks[i].Bytes())
+		val, err := decodeReadTagValue(tags[i], iois[i], respTypes[i], chunks[i].Bytes(), status[i])
 		if err != nil {
 			resultValues[i] = fmt.Errorf("problem decoding read value for %s: %w", tags[i].TagName, err)
 			continue

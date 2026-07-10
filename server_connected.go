@@ -172,10 +172,19 @@ func (h *serverTCPHandler) connectedMulti(items []CIPItem) error {
 			// build this portion of the response msg
 
 			typ, _ := GoVarToCIPType(result)
-			rhdr := msgMultiReadResult{Service: svc.AsResponse(), Status: 0, Type: typ}
+			rhdr := msgMultiReadResult{Service: svc.AsResponse(), Status: 0}
 			b, err := Serialize(rhdr)
 			if err != nil {
 				return fmt.Errorf("problem serializing header for %s: %w", tagname, err)
+			}
+			typeHdr := msgMultiReadResultTypeHdr{Type: typ, TypeInfoLen: 0}
+			b2, err := Serialize(typeHdr)
+			if err != nil {
+				return fmt.Errorf("problem serializing type header for %s: %w", tagname, err)
+			}
+			_, err = b2.WriteTo(b)
+			if err != nil {
+				return fmt.Errorf("problem writing type header for %s: %w", tagname, err)
 			}
 			if typ == CIPTypeSTRING {
 				res_str, ok := result.(string)
