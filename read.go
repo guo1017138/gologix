@@ -948,7 +948,7 @@ func estimateTagResponseSize(tag tagDesc) int {
 		elements = 1
 	}
 
-	resultHdrSize := binary.Size(msgMultiReadResult{})
+	resultHdrSize := binary.Size(msgMultiReadResult{}) + binary.Size(msgMultiReadResultTypeHdr{})
 	if tag.TagType != CIPTypeStruct {
 		return resultHdrSize + tag.TagType.Size()*elements
 	}
@@ -1341,6 +1341,9 @@ func (client *Client) ReadMap(m map[string]any) (processedTags []string, err err
 
 	err = client.checkConnection()
 	if err != nil {
+		if errors.Is(err, ErrAutoReconnectInProgress) {
+			return processedTags, nil
+		}
 		return processedTags, fmt.Errorf("could not start multi read: %w", err)
 	}
 
@@ -1403,6 +1406,9 @@ func (client *Client) ReadMap(m map[string]any) (processedTags []string, err err
 func (client *Client) ReadMapFrag(m map[string]any) (processedTags []string, err error) {
 	err = client.checkConnection()
 	if err != nil {
+		if errors.Is(err, ErrAutoReconnectInProgress) {
+			return processedTags, nil
+		}
 		return processedTags, fmt.Errorf("could not start fragmented multi read: %w", err)
 	}
 

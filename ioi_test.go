@@ -189,3 +189,70 @@ func TestIOIKeepsSymbolicPathForStructArray(t *testing.T) {
 		t.Fatalf("expected struct array reads to stay symbolic, got %v", to_hex(res.Buffer))
 	}
 }
+
+func TestIOIBoolArrayElementUsesPackedWordBit(t *testing.T) {
+	client := Client{}
+
+	res, err := client.newIOI("sys.SYS_SEL[8]", CIPTypeBOOL)
+	if err != nil {
+		t.Fatalf("IOI Generation error. %v", err)
+	}
+
+	want := []byte{
+		0x91, 0x03, 's', 'y', 's', 0x00,
+		0x91, 0x07, 's', 'y', 's', '_', 's', 'e', 'l', 0x00,
+		0x28, 0x00,
+	}
+	if !check_bytes(res.Buffer, want) {
+		t.Fatalf("expected bool array element to read packed word.\nWanted %v\nGot    %v", to_hex(want), to_hex(res.Buffer))
+	}
+	if !res.BitAccess || res.BitPosition != 8 {
+		t.Fatalf("expected bit access at bit 8, got access=%v bit=%d", res.BitAccess, res.BitPosition)
+	}
+}
+
+func TestIOIBoolArrayElementCrossesPackedWordBoundary(t *testing.T) {
+	client := Client{}
+
+	res, err := client.newIOI("BoolArray[40]", CIPTypeBOOL)
+	if err != nil {
+		t.Fatalf("IOI Generation error. %v", err)
+	}
+
+	want := []byte{
+		0x91, 0x09, 'b', 'o', 'o', 'l', 'a', 'r', 'r', 'a', 'y', 0x00,
+		0x28, 0x01,
+	}
+	if !check_bytes(res.Buffer, want) {
+		t.Fatalf("expected bool array element to read packed word.\nWanted %v\nGot    %v", to_hex(want), to_hex(res.Buffer))
+	}
+	if !res.BitAccess || res.BitPosition != 8 {
+		t.Fatalf("expected bit access at bit 8, got access=%v bit=%d", res.BitAccess, res.BitPosition)
+	}
+}
+
+func TestIOIBoolArrayMemberWithKnownPrefixUsesPackedWordBit(t *testing.T) {
+	client := Client{
+		KnownTags: map[string]KnownTag{
+			"sys": {Name: "sys", Instance: 45},
+		},
+		ioi_cache:     make(map[string]*tagIOI),
+		knownFirmware: 32,
+	}
+
+	res, err := client.newIOI("sys.SYS_SEL[8]", CIPTypeBOOL)
+	if err != nil {
+		t.Fatalf("IOI Generation error. %v", err)
+	}
+
+	want := append(KnownTag{Name: "sys", Instance: 45}.Bytes(), []byte{
+		0x91, 0x07, 's', 'y', 's', '_', 's', 'e', 'l', 0x00,
+		0x28, 0x00,
+	}...)
+	if !check_bytes(res.Buffer, want) {
+		t.Fatalf("expected bool array member to read packed word.\nWanted %v\nGot    %v", to_hex(want), to_hex(res.Buffer))
+	}
+	if !res.BitAccess || res.BitPosition != 8 {
+		t.Fatalf("expected bit access at bit 8, got access=%v bit=%d", res.BitAccess, res.BitPosition)
+	}
+}

@@ -187,6 +187,13 @@ func appendIOIPart(ioi *tagIOI, tagPart string) error {
 		if err != nil {
 			return fmt.Errorf("problem parsing path %q: %w", tagPart, err)
 		}
+		if ioi.Type == CIPTypeBOOL && len(t.Array_Order) > 0 {
+			lastIndex := len(t.Array_Order) - 1
+			bitIndex := t.Array_Order[lastIndex]
+			t.Array_Order[lastIndex] = bitIndex / 32
+			ioi.BitAccess = true
+			ioi.BitPosition = bitIndex % 32
+		}
 		for _, orderSize := range t.Array_Order {
 			if orderSize < 256 {
 				indexPart := []byte{byte(cipElement_8bit), byte(orderSize)}

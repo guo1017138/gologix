@@ -8,7 +8,7 @@ import (
 
 func TestEstimateTagResponseSizeIncludesResultHeader(t *testing.T) {
 	tag := tagDesc{TagName: "TagA", TagType: CIPTypeDINT, Elements: 1}
-	want := binary.Size(msgMultiReadResult{}) + int(CIPTypeDINT.Size())
+	want := binary.Size(msgMultiReadResult{}) + binary.Size(msgMultiReadResultTypeHdr{}) + int(CIPTypeDINT.Size())
 	if got := estimateTagResponseSize(tag); got != want {
 		t.Fatalf("unexpected estimated DINT response size: got %d want %d", got, want)
 	}
@@ -24,7 +24,7 @@ func TestEstimateTagResponseSizeIncludesStructHeader(t *testing.T) {
 			Value float32
 		}{},
 	}
-	minWant := binary.Size(msgMultiReadResult{}) + binary.Size(cipStructHeader{})
+	minWant := binary.Size(msgMultiReadResult{}) + binary.Size(msgMultiReadResultTypeHdr{}) + binary.Size(cipStructHeader{})
 	if got := estimateTagResponseSize(tag); got <= minWant {
 		t.Fatalf("expected struct response estimate to include payload beyond headers, got %d", got)
 	}
@@ -41,7 +41,7 @@ func TestEstimateTagResponseSizeAlignsStructPayloadToEightBytes(t *testing.T) {
 		}{},
 	}
 
-	want := binary.Size(msgMultiReadResult{}) + binary.Size(cipStructHeader{}) + 8
+	want := binary.Size(msgMultiReadResult{}) + binary.Size(msgMultiReadResultTypeHdr{}) + binary.Size(cipStructHeader{}) + 8
 	if got := estimateTagResponseSize(tag); got != want {
 		t.Fatalf("unexpected aligned struct response estimate: got %d want %d", got, want)
 	}
