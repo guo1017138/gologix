@@ -21,6 +21,8 @@ const (
 	rpiDefault              = time.Millisecond * 2500
 )
 
+var ErrAutoReconnectInProgress = errors.New("AutoConnect retry already in progress")
+
 func (client *Client) startConnect() error {
 	client.mutex.Lock()
 	defer client.mutex.Unlock()
@@ -28,9 +30,9 @@ func (client *Client) startConnect() error {
 	case connectionStatusConnected:
 		return fmt.Errorf("already connected")
 	case connectionStatusConnecting:
-		return fmt.Errorf("connection is already in progress")
+		return fmt.Errorf("%w: connection is already in progress", ErrAutoReconnectInProgress)
 	case connectionStatusDisconnecting:
-		return fmt.Errorf("connection is currently disconnecting")
+		return fmt.Errorf("%w: connection is currently disconnecting", ErrAutoReconnectInProgress)
 	case connectionStatusDisconnected:
 		client.connStatus = connectionStatusConnecting
 		return nil
@@ -549,6 +551,9 @@ func (client *Client) checkConnection() error {
 		if client.AutoConnect {
 			err := client.Connect()
 			if err != nil {
+				if errors.Is(err, ErrAutoReconnectInProgress) {
+					return fmt.Errorf("not connected and %w", ErrAutoReconnectInProgress)
+				}
 				return fmt.Errorf("not connected and connect attempt failed: %w", err)
 			}
 		} else {

@@ -53,6 +53,10 @@ func (client *Client) startDisconnect() error {
 // Returns an error if already disconnected or if there are issues during the
 // disconnection sequence, but the connection will be closed regardless.
 func (client *Client) Disconnect() error {
+	client.mutex.Lock()
+	status := client.connStatus
+	client.mutex.Unlock()
+
 	err := client.startDisconnect()
 	if err != nil {
 		return err
@@ -68,6 +72,17 @@ func (client *Client) Disconnect() error {
 
 	if client.keepAliveRunning {
 		close(client.cancel_keepalive)
+	}
+
+	if status == connectionStatusConnecting {
+		if client.conn != nil {
+			err = client.conn.Close()
+			if err != nil {
+				client.Logger.Error("error closing connection", slog.Any("err", err))
+			}
+		}
+		client.Logger.Info("successfully disconnected from controller")
+		return nil
 	}
 
 	items := make([]CIPItem, 2)
